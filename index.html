@@ -190,17 +190,18 @@ tailwind.config = {
 function toggleTheme() {
   const h = document.documentElement;
   const isDark = h.classList.contains('dark');
-  if (isDark) { h.classList.remove('dark'); h.classList.add('light'); }
-  else { h.classList.remove('light'); h.classList.add('dark'); }
-  const nowDark = h.classList.contains('dark');
+  // Swap class
+  h.className = isDark ? 'light' : 'dark';
+  const nowDark = !isDark;
   // Toggle icons
   document.querySelectorAll('.dark-icon').forEach(el => el.style.display = nowDark ? 'block' : 'none');
   document.querySelectorAll('.light-icon').forEach(el => el.style.display = nowDark ? 'none' : 'block');
-  // Force all elements to re-read CSS variables
-  document.body.style.backgroundColor = 'var(--c-surface)';
-  document.body.style.color = 'var(--c-txt-primary)';
-  // Force repaint
-  document.body.offsetHeight;
+  // Nuclear repaint — briefly remove and re-add body to force full CSS recalculation
+  const body = document.body;
+  const parent = body.parentNode;
+  const next = body.nextSibling;
+  parent.removeChild(body);
+  parent.insertBefore(body, next);
 }
 </script>
 
