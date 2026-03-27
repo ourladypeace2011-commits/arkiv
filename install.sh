@@ -52,10 +52,14 @@ echo ""
 # ── 2. Get arkiv source ──
 REPO="https://github.com/ourladypeace2011-commits/arkiv.git"
 
-if [ -f "$(dirname "$0")/server.py" ]; then
-    # Running from local clone — copy files
-    SRC="$(cd "$(dirname "$0")" && pwd)"
-    echo "Setting up arkiv at $INSTALL_DIR (from local)..."
+SRC="$(cd "$(dirname "$0")" && pwd)"
+
+if [ "$SRC" = "$INSTALL_DIR" ]; then
+    # Already running from install dir (git clone directly to ~/.arkiv)
+    echo "Setting up arkiv at $INSTALL_DIR..."
+elif [ -f "$SRC/server.py" ]; then
+    # Running from a different local directory — copy files
+    echo "Setting up arkiv at $INSTALL_DIR (from $SRC)..."
     mkdir -p "$INSTALL_DIR"
     for f in server.py db.py config.py health.py index.html ingest.py transcribe.py embed.py frames.py vision.py vectordb.py requirements.txt .env.example smoke-test.sh install.sh uninstall.sh arkiv.command LICENSE README.md watch.py; do
         [ -f "$SRC/$f" ] && cp "$SRC/$f" "$INSTALL_DIR/"
