@@ -745,13 +745,25 @@ async function doChangeLang(id, lang) {
 }
 
 async function doReIngest(id) {
-  if (!confirm('重新轉錄此檔案？（需要幾分鐘）')) return;
+  if (!confirm('重新處理此檔案？（probe + 轉錄 + 縮圖 + 視覺分析，需要幾分鐘）')) return;
+  showIngestModal('Re-ingest 處理中...', '正在重新分析影片');
   try {
     const r = await fetch(`/api/media/${id}/reingest`, { method: 'POST' });
-    if (r.ok) { alert('Re-ingest 完成'); await fetchDetail(id); renderInspector(); }
-    else if (r.status === 404 || r.status === 405) { alert('Re-ingest 功能尚未實作。\n請在終端手動執行：\npython ingest.py --dir "' + (state.detail?.path || '') + '" --refresh'); }
-    else alert('Re-ingest 失敗: ' + r.status);
-  } catch(e) { alert('Re-ingest 功能尚未實作。\n請在終端手動執行 ingest.py --refresh'); }
+    hideIngestModal();
+    if (r.ok) {
+      const data = await r.json();
+      if (data.ok) {
+        alert('Re-ingest 完成！');
+        await fetchDetail(id);
+        renderInspector();
+        await refresh();
+      } else {
+        alert('Re-ingest 失敗：\n' + (data.stderr || data.error || ''));
+      }
+    } else {
+      alert('Re-ingest 失敗: HTTP ' + r.status);
+    }
+  } catch(e) { hideIngestModal(); alert('Re-ingest 錯誤：' + e.message); }
 }
 
 function setView(v) {
