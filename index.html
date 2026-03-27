@@ -173,7 +173,7 @@ tailwind.config = {
     </button>
   </div>
 
-  <button class="export-btn ml-1.5 shrink-0" title="Export GOOD takes as EDL">
+  <button class="export-btn ml-1.5 shrink-0" title="Export GOOD takes as EDL" onclick="doExportGoodEdl()">
     <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
     EDL Export
   </button>
@@ -204,7 +204,7 @@ function toggleTheme() {
   <aside class="w-48 shrink-0 bg-panel border-r border-panel-border flex flex-col overflow-hidden">
     <div class="h-7 flex items-center justify-between px-3 border-b border-panel-border shrink-0">
       <span class="text-2xs font-semibold text-txt-tertiary uppercase tracking-wider">Media Pool</span>
-      <button class="text-txt-tertiary hover:text-txt-primary"><svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 5v14m-7-7h14"/></svg></button>
+      <button class="text-txt-tertiary hover:text-txt-primary" onclick="doAddMediaFolder()" title="Ingest folder"><svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 5v14m-7-7h14"/></svg></button>
     </div>
     <div class="flex-1 overflow-y-auto py-1" id="mediaPool"></div>
     <div class="border-t border-panel-border px-3 py-1.5 text-2xs text-txt-tertiary shrink-0" id="poolStats"></div>
@@ -427,7 +427,7 @@ async function renderInspector() {
       ${thumb ? `<img src="${thumb}" class="w-full h-full object-cover" onerror="this.style.display='none'"/>` : ''}
       <div class="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent"></div>
       ${!thumb ? `<div class="absolute inset-0 flex items-center justify-center">${isAudio?audioSvg:videoSvg}</div>` : ''}
-      <button class="absolute inset-0 flex items-center justify-center">
+      <button class="absolute inset-0 flex items-center justify-center" onclick="doPlayMedia(${rec.id})">
         <div class="w-10 h-10 bg-white/20 backdrop-blur rounded-full flex items-center justify-center hover:bg-white/30 transition">
           <svg class="w-5 h-5 text-white ml-0.5" fill="currentColor" viewBox="0 0 20 20"><path d="M6.3 2.841A1.5 1.5 0 004 4.11V15.89a1.5 1.5 0 002.3 1.269l9.344-5.89a1.5 1.5 0 000-2.538L6.3 2.84z"/></svg>
         </div>
@@ -511,6 +511,25 @@ async function renderAnalytics() {
     const goodPct = Math.round((r.good||0)/total*100), ngPct = Math.round((r.ng||0)/total*100), unrPct = Math.round((r.unrated||0)/total*100);
     const topTags = (stats.top_tags||[]).map(t=>`<span class="tag tag-auto">${t.name} <sup>${t.count}</sup></span>`).join(' ');
 
+    // Fetch duration-by-lang and size-by-ext
+    let langBars = '', sizeBars = '';
+    try {
+      const langs = await (await fetch('/api/duration-by-lang')).json();
+      const totalDur = langs.reduce((s,l) => s+l.total_duration_s, 0) || 1;
+      langBars = langs.map(l => {
+        const pct = Math.round(l.total_duration_s/totalDur*100);
+        return `<div class="flex items-center gap-1 text-2xs"><span class="w-6 text-txt-tertiary">${l.lang||'?'}</span><div class="w-16 h-1.5 bg-surface-200 rounded-full overflow-hidden"><div class="h-full bg-accent rounded-full" style="width:${pct}%"></div></div><span class="text-txt-tertiary">${fmtDur(l.total_duration_s)}</span></div>`;
+      }).join('');
+    } catch(e) {}
+    try {
+      const exts = await (await fetch('/api/size-by-ext')).json();
+      const totalMb = exts.reduce((s,e) => s+e.total_mb, 0) || 1;
+      sizeBars = exts.map(e => {
+        const pct = Math.round(e.total_mb/totalMb*100);
+        return `<div class="flex items-center gap-1 text-2xs"><span class="w-8 text-txt-tertiary">${e.ext}</span><div class="w-16 h-1.5 bg-surface-200 rounded-full overflow-hidden"><div class="h-full bg-warning rounded-full" style="width:${pct}%"></div></div><span class="text-txt-tertiary">${(e.total_mb/1024).toFixed(1)}GB</span></div>`;
+      }).join('');
+    } catch(e) {}
+
     document.getElementById('analyticsContent').innerHTML = `
       <div class="flex items-center gap-2"><div><div class="text-2xs text-txt-tertiary">Total</div><div class="text-sm font-semibold">${stats.total}</div></div><div class="sparkline w-16"></div></div>
       <div class="flex items-center gap-2"><div><div class="text-2xs text-txt-tertiary">GOOD</div><div class="text-sm font-semibold text-success">${r.good||0}</div></div>
@@ -520,6 +539,8 @@ async function renderAnalytics() {
       <div class="flex items-center gap-2"><div><div class="text-2xs text-txt-tertiary">Unrated</div><div class="text-sm font-semibold text-txt-tertiary">${r.unrated||0}</div></div>
         <div class="w-16 h-1.5 bg-surface-200 rounded-full overflow-hidden"><div class="h-full bg-txt-tertiary rounded-full" style="width:${unrPct}%"></div></div></div>
       <div class="flex items-center gap-2"><div><div class="text-2xs text-txt-tertiary">Duration</div><div class="text-sm font-semibold">${fmtDur(stats.total_duration_s)}</div></div><div class="sparkline w-16"></div></div>
+      ${langBars ? `<div class="flex flex-col gap-0.5"><div class="text-2xs text-txt-tertiary font-semibold">Duration by Lang</div>${langBars}</div>` : ''}
+      ${sizeBars ? `<div class="flex flex-col gap-0.5"><div class="text-2xs text-txt-tertiary font-semibold">Size by Type</div>${sizeBars}</div>` : ''}
       <div class="flex items-center gap-3 ml-auto text-2xs text-txt-tertiary"><span>Top tags:</span>${topTags}</div>`;
 
     document.getElementById('headerStats').innerHTML = `<span>${stats.total} files</span><span>·</span><span class="text-success">${r.good||0} GOOD</span><span>·</span><span class="text-danger">${r.ng||0} NG</span>`;
@@ -569,14 +590,34 @@ function doExport(id, fmt) {
   window.open(`/api/media/${id}/export/${fmt}`, '_blank');
 }
 
+function doExportGoodEdl() {
+  // Export all GOOD-rated takes as combined EDL
+  const goodItems = state.items.filter(r => r.rating === 'good');
+  if (goodItems.length === 0) { alert('沒有 GOOD 評級的素材'); return; }
+  // Export first GOOD item's EDL (future: combine multiple)
+  window.open(`/api/media/${goodItems[0].id}/export/edl`, '_blank');
+}
+
 function doOpenFile(id) {
   const rec = state.items.find(r => r.id === id) || state.detail;
   if (rec && rec.path) {
-    // Copy path to clipboard as fallback (can't open local files from browser)
     navigator.clipboard.writeText(rec.path).then(() => {
       alert('檔案路徑已複製到剪貼簿：\n' + rec.path);
     });
   }
+}
+
+function doPlayMedia(id) {
+  const rec = state.items.find(r => r.id === id) || state.detail;
+  if (rec && rec.path) {
+    navigator.clipboard.writeText(rec.path).then(() => {
+      alert('瀏覽器無法直接播放本機檔案。\n路徑已複製到剪貼簿，請在 DaVinci Resolve 或 Finder 開啟：\n\n' + rec.path);
+    });
+  }
+}
+
+function doAddMediaFolder() {
+  alert('請在終端執行：\n\ncd ~/.arkiv && source .venv/bin/activate\npython ingest.py --dir "/path/to/footage"\n\n灌入完成後重整頁面即可看到新素材。');
 }
 
 async function doReIngest(id) {
@@ -584,8 +625,9 @@ async function doReIngest(id) {
   try {
     const r = await fetch(`/api/media/${id}/reingest`, { method: 'POST' });
     if (r.ok) { alert('Re-ingest 完成'); await fetchDetail(id); renderInspector(); }
+    else if (r.status === 404 || r.status === 405) { alert('Re-ingest 功能尚未實作。\n請在終端手動執行：\npython ingest.py --dir "' + (state.detail?.path || '') + '" --refresh'); }
     else alert('Re-ingest 失敗: ' + r.status);
-  } catch(e) { alert('Re-ingest 錯誤: ' + e.message); }
+  } catch(e) { alert('Re-ingest 功能尚未實作。\n請在終端手動執行 ingest.py --refresh'); }
 }
 
 function setView(v) {
