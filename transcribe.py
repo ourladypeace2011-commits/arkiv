@@ -2,9 +2,10 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-WHISPER_MODEL = "mlx-community/whisper-large-v3-mlx"
+WHISPER_MODEL = "mlx-community/whisper-large-v3-turbo"
 NO_SPEECH_THRESHOLD = 0.6
 DEFAULT_LANGUAGE = "zh"  # 強制繁體中文，避免簡體/日文亂跳
+LLM_POLISH = True  # 用 Ollama LLM 後處理校正逐字稿
 
 
 def transcribe(media_path: str, language: str = DEFAULT_LANGUAGE) -> tuple[str, str]:
@@ -73,6 +74,10 @@ def transcribe(media_path: str, language: str = DEFAULT_LANGUAGE) -> tuple[str, 
         if _has_char_loops(filtered_text):
             filtered_text = _remove_char_loops(filtered_text)
 
+        # Step 5: LLM polish — fix typos, names, punctuation
+        if LLM_POLISH and len(filtered_text) > 10:
+            filtered_text = _llm_polish(filtered_text, language)
+
         return filtered_text, lang
     finally:
         Path(wav).unlink(missing_ok=True)
@@ -98,6 +103,47 @@ def _remove_char_loops(text: str) -> str:
     """Remove character-level loops, keep one instance."""
     import re
     return re.sub(r'(.{2,4})\1{2,}', r'\1', text)
+
+
+def _llm_polish(text: str, language: str = "zh") -> str:
+    """Use Ollama LLM to fix Whisper transcription errors."""
+    import requests as _req
+    OLLAMA_URL = "http://localhost:11434"
+    # Use a small fast model for correction
+    MODEL = "qwen2.5:14b"
+
+    lang_name = {"zh": "繁體中文", "en": "English", "ja": "日本語", "ko": "한국어"}.get(language, language)
+
+    prompt = f"""你是一個逐字稿校正助手。以下是語音辨識（Whisper）的原始輸出，可能有錯字、同音字錯誤、人名地名錯誤、缺少標點。
+
+請校正以下逐字稿，規則：
+1. 修正明顯的同音字錯誤（例如「蕭希」→「小熙」）
+2. 補上適當的標點符號（句號、逗號、問號）
+3. 不要改變原意、不要增刪內容
+4. 保持口語化，不要改成書面語
+5. 語言：{lang_name}
+6. 只輸出校正後的文字，不要加任何說明
+
+原始逐字稿：
+{text}
+
+校正後："""
+
+    try:
+        r = _req.post(f"{OLLAMA_URL}/api/generate", json={
+            "model": MODEL,
+            "prompt": prompt,
+            "stream": False,
+            "options": {"temperature": 0.1, "num_predict": len(text) * 2}
+        }, timeout=60)
+        if r.ok:
+            polished = r.json().get("response", "").strip()
+            # Sanity check: polished should be similar length (not hallucinated)
+            if polished and 0.5 < len(polished) / max(len(text), 1) < 2.0:
+                return polished
+    except Exception:
+        pass
+    return text  # fallback to original if LLM fails
 
 
 def _to_wav(media_path: str) -> str | None:
