@@ -242,6 +242,33 @@ def ingest_media(body: IngestRequest):
         return {"ok": False, "error": "Ingest timeout (>30min)"}
 
 
+# ── Re-transcribe ─────────────────────────────────────────────────────────────
+
+class RetranscribeRequest(BaseModel):
+    language: str = "zh"
+
+@app.post("/api/media/{media_id}/retranscribe")
+def retranscribe_media(media_id: int, body: RetranscribeRequest):
+    """Re-run Whisper with specified language."""
+    rec = db.get_record_by_id(media_id)
+    if not rec:
+        raise HTTPException(404, "Not found")
+    media_path = rec.get("path", "")
+    if not Path(media_path).exists():
+        raise HTTPException(400, f"Media file not found: {media_path}")
+    try:
+        import transcribe as tr
+        text, lang = tr.transcribe(media_path, language=body.language)
+        with db.get_conn() as conn:
+            conn.execute(
+                "UPDATE media SET transcript=?, lang=? WHERE id=?",
+                (text, body.language, media_id)
+            )
+        return {"ok": True, "transcript_length": len(text), "language": body.language}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
 # ── Export ────────────────────────────────────────────────────────────────────
 
 @app.get("/api/media/{media_id}/export/{fmt}")

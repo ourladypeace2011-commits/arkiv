@@ -470,7 +470,17 @@ async function renderInspector() {
         <tr class="border-b border-panel-border"><td class="py-1 text-txt-tertiary">Resolution</td><td class="py-1 font-mono">${res}</td></tr>
         <tr class="border-b border-panel-border"><td class="py-1 text-txt-tertiary">FPS</td><td class="py-1 font-mono">${rec.fps||'-'}</td></tr>
         <tr class="border-b border-panel-border"><td class="py-1 text-txt-tertiary">Size</td><td class="py-1 font-mono">${size}</td></tr>
-        <tr class="border-b border-panel-border"><td class="py-1 text-txt-tertiary">Language</td><td class="py-1"><span class="bg-accent/20 text-accent text-2xs px-1.5 rounded">${rec.lang||'-'}</span></td></tr>
+        <tr class="border-b border-panel-border"><td class="py-1 text-txt-tertiary">Language</td><td class="py-1 flex items-center gap-1">
+          <select class="bg-surface border border-panel-border text-xs text-txt-primary rounded px-1 py-0.5" onchange="doChangeLang(${rec.id}, this.value)">
+            <option value="zh" ${rec.lang==='zh'?'selected':''}>中文</option>
+            <option value="en" ${rec.lang==='en'?'selected':''}>English</option>
+            <option value="ja" ${rec.lang==='ja'?'selected':''}>日本語</option>
+            <option value="ko" ${rec.lang==='ko'?'selected':''}>한국어</option>
+            <option value="fr" ${rec.lang==='fr'?'selected':''}>Français</option>
+            <option value="de" ${rec.lang==='de'?'selected':''}>Deutsch</option>
+            <option value="es" ${rec.lang==='es'?'selected':''}>Español</option>
+          </select>
+        </td></tr>
         <tr><td class="py-1 text-txt-tertiary">Processed</td><td class="py-1 font-mono text-2xs">${(rec.processed_at||'-').slice(0,19)}</td></tr>
       </tbody></table>
     </div>
@@ -718,6 +728,20 @@ function updateIngestModal(title, detail) {
 function hideIngestModal() {
   const m = document.getElementById('ingestModal');
   if (m) m.style.display = 'none';
+}
+
+async function doChangeLang(id, lang) {
+  if (!confirm(`切換語言為 ${lang} 並重新轉錄？`)) { await fetchDetail(id); renderInspector(); return; }
+  showIngestModal('重新轉錄中...', `語言: ${lang}`);
+  try {
+    const r = await fetch(`/api/media/${id}/retranscribe`, {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({language: lang})
+    });
+    hideIngestModal();
+    if (r.ok) { alert('轉錄完成'); await fetchDetail(id); renderInspector(); }
+    else { const d = await r.json().catch(()=>({})); alert('轉錄失敗: ' + (d.error || r.status)); }
+  } catch(e) { hideIngestModal(); alert('錯誤: ' + e.message); }
 }
 
 async function doReIngest(id) {
