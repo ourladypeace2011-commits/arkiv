@@ -269,6 +269,33 @@ def retranscribe_media(media_id: int, body: RetranscribeRequest):
         raise HTTPException(500, str(e))
 
 
+@app.post("/api/media/{media_id}/reingest")
+def reingest_media(media_id: int):
+    """Re-run full ingest pipeline: probe + whisper + thumbnail + llava + embed."""
+    rec = db.get_record_by_id(media_id)
+    if not rec:
+        raise HTTPException(404, "Not found")
+    media_path = rec.get("path", "")
+    if not Path(media_path).exists():
+        raise HTTPException(400, f"Media file not found: {media_path}")
+    import subprocess, sys
+    try:
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "ingest.py"), "--dir", str(Path(media_path).parent),
+             "--limit", "1", "--refresh"],
+            capture_output=True, text=True, timeout=600, cwd=str(ROOT)
+        )
+        return {
+            "ok": result.returncode == 0,
+            "stdout": result.stdout[-1000:] if result.stdout else "",
+            "stderr": result.stderr[-500:] if result.stderr else "",
+        }
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "Reingest timeout (>10min)"}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
 # ── Export ────────────────────────────────────────────────────────────────────
 
 @app.get("/api/media/{media_id}/export/{fmt}")
