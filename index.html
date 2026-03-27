@@ -26,7 +26,7 @@ tailwind.config = {
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
   * { box-sizing: border-box; }
-  body { margin: 0; overflow: hidden; transition: background 0.2s, color 0.2s; }
+  body { margin: 0; overflow: hidden; transition: background-color 0.2s, color 0.2s; background-color: var(--c-surface); color: var(--c-txt-primary); }
 
   :root, .dark {
     --c-surface: #1a1a1e; --c-surface-50: #222226; --c-surface-100: #2a2a2e; --c-surface-200: #323236;
@@ -193,10 +193,14 @@ function toggleTheme() {
   if (isDark) { h.classList.remove('dark'); h.classList.add('light'); }
   else { h.classList.remove('light'); h.classList.add('dark'); }
   const nowDark = h.classList.contains('dark');
+  // Toggle icons
   document.querySelectorAll('.dark-icon').forEach(el => el.style.display = nowDark ? 'block' : 'none');
   document.querySelectorAll('.light-icon').forEach(el => el.style.display = nowDark ? 'none' : 'block');
-  document.body.style.background = nowDark ? '#1a1a1e' : '#f5f5f7';
-  document.body.style.color = nowDark ? '#e4e4e7' : '#1a1a1e';
+  // Force all elements to re-read CSS variables
+  document.body.style.backgroundColor = 'var(--c-surface)';
+  document.body.style.color = 'var(--c-txt-primary)';
+  // Force repaint
+  document.body.offsetHeight;
 }
 </script>
 
