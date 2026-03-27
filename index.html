@@ -626,27 +626,97 @@ function doPlayMedia(id) {
 async function doAddMediaFolder() {
   const path = prompt('輸入素材資料夾路徑：\n\n例如：/Volumes/SSD/影片/\n或 ~/Movies/rushes/');
   if (!path) return;
-  const limit = prompt('要處理幾個檔案？（0 = 全部，建議先試 3）', '3');
-  const btn = event?.target;
-  if (btn) btn.disabled = true;
+
+  // Step 1: Scan (fast)
+  showIngestModal('掃描中...', '正在讀取資料夾');
+  let scan;
   try {
-    const el = document.getElementById('poolStats');
-    if (el) el.innerHTML = '<div class="text-warning text-2xs">Ingesting... 請稍候</div>';
+    const r = await fetch('/api/ingest/scan', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({path})
+    });
+    if (!r.ok) { hideIngestModal(); alert('路徑不存在：' + path); return; }
+    scan = await r.json();
+  } catch(e) { hideIngestModal(); alert('掃描錯誤：' + e.message); return; }
+
+  if (scan.total === 0) { hideIngestModal(); alert('找不到媒體檔案'); return; }
+
+  // Show scan result, ask to proceed
+  hideIngestModal();
+  const msg = `找到 ${scan.total} 個媒體檔案（${scan.new} 個新的）\n\n要處理幾個？（0 = 全部，建議先試 3）`;
+  const limitStr = prompt(msg, scan.new > 3 ? '3' : '0');
+  if (limitStr === null) return;
+  const limit = parseInt(limitStr) || 0;
+
+  // Step 2: Ingest with polling progress
+  const beforeTotal = (await (await fetch('/api/stats')).json()).total || 0;
+  const targetCount = limit > 0 ? Math.min(limit, scan.new) : scan.new;
+  showIngestModal(`處理中 0/${targetCount}`, '轉錄 + 視覺分析 + 向量化...');
+
+  // Start polling
+  const pollId = setInterval(async () => {
+    try {
+      const s = await (await fetch('/api/stats')).json();
+      const done = (s.total || 0) - beforeTotal;
+      updateIngestModal(`處理中 ${done}/${targetCount}`, done >= targetCount ? '即將完成...' : '轉錄 + 視覺分析 + 向量化...');
+    } catch(e) {}
+  }, 3000);
+
+  // Run ingest
+  try {
     const r = await fetch('/api/ingest', {
-      method: 'POST',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({path, limit: parseInt(limit)||0})
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({path, limit})
     });
     const data = await r.json();
+    clearInterval(pollId);
+    hideIngestModal();
     if (data.ok) {
-      alert('Ingest 完成！\n\n' + (data.stdout||'').slice(-500));
-      await refresh();
-      renderAnalytics();
+      const finalStats = await (await fetch('/api/stats')).json();
+      const added = (finalStats.total || 0) - beforeTotal;
+      alert(`完成！新增 ${added} 個素材`);
     } else {
-      alert('Ingest 失敗：\n' + (data.stderr || data.error || 'Unknown error'));
+      alert('Ingest 失敗：\n' + (data.stderr || data.error || ''));
     }
-  } catch(e) { alert('Ingest 錯誤：' + e.message); }
-  finally { if (btn) btn.disabled = false; await refresh(); }
+  } catch(e) { clearInterval(pollId); hideIngestModal(); alert('錯誤：' + e.message); }
+  await refresh(); renderAnalytics();
+}
+
+function showIngestModal(title, detail) {
+  let m = document.getElementById('ingestModal');
+  if (!m) {
+    m = document.createElement('div');
+    m.id = 'ingestModal';
+    m.style.cssText = 'position:fixed;inset:0;z-index:100;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.6)';
+    m.innerHTML = `<div style="background:var(--c-panel);border:1px solid var(--c-panel-border);border-radius:12px;padding:24px 32px;min-width:300px;text-align:center">
+      <div id="ingestTitle" style="font-size:16px;font-weight:600;color:var(--c-txt-primary);margin-bottom:8px"></div>
+      <div id="ingestDetail" style="font-size:12px;color:var(--c-txt-secondary);margin-bottom:16px"></div>
+      <div style="width:100%;height:4px;background:var(--c-surface-200);border-radius:2px;overflow:hidden"><div id="ingestBar" style="height:100%;background:#3b82f6;border-radius:2px;transition:width 0.3s;width:0%"></div></div>
+    </div>`;
+    document.body.appendChild(m);
+  }
+  m.style.display = 'flex';
+  document.getElementById('ingestTitle').textContent = title;
+  document.getElementById('ingestDetail').textContent = detail;
+}
+
+function updateIngestModal(title, detail) {
+  const t = document.getElementById('ingestTitle');
+  const d = document.getElementById('ingestDetail');
+  if (t) t.textContent = title;
+  if (d) d.textContent = detail;
+  // Parse progress from title like "處理中 2/5"
+  const match = title.match(/(\d+)\/(\d+)/);
+  if (match) {
+    const pct = Math.round(parseInt(match[1]) / parseInt(match[2]) * 100);
+    const bar = document.getElementById('ingestBar');
+    if (bar) bar.style.width = pct + '%';
+  }
+}
+
+function hideIngestModal() {
+  const m = document.getElementById('ingestModal');
+  if (m) m.style.display = 'none';
 }
 
 async function doReIngest(id) {

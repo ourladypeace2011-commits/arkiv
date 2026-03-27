@@ -203,6 +203,24 @@ class IngestRequest(BaseModel):
     path: str
     limit: int = 0
 
+class ScanRequest(BaseModel):
+    path: str
+
+MEDIA_EXTS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".mp3", ".wav", ".flac", ".aac", ".m4a", ".ogg"}
+
+@app.post("/api/ingest/scan")
+def scan_media(body: ScanRequest):
+    """Quick scan — return file list without processing."""
+    target = Path(body.path).expanduser()
+    if not target.exists():
+        raise HTTPException(400, f"Path not found: {body.path}")
+    files = []
+    for f in sorted(target.rglob("*")):
+        if f.suffix.lower() in MEDIA_EXTS:
+            already = db.is_processed(str(f)) if hasattr(db, 'is_processed') else False
+            files.append({"name": f.name, "size_mb": round(f.stat().st_size / 1048576, 1), "path": str(f), "already": already})
+    return {"total": len(files), "new": sum(1 for f in files if not f["already"]), "files": files}
+
 @app.post("/api/ingest")
 def ingest_media(body: IngestRequest):
     """Trigger ingest from the web UI — runs ingest.py as subprocess."""
