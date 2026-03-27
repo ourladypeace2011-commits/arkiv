@@ -197,6 +197,33 @@ def size_by_ext():
         return [dict(r) for r in rows]
 
 
+# ── Ingest ────────────────────────────────────────────────────────────────────
+
+class IngestRequest(BaseModel):
+    path: str
+    limit: int = 0
+
+@app.post("/api/ingest")
+def ingest_media(body: IngestRequest):
+    """Trigger ingest from the web UI — runs ingest.py as subprocess."""
+    import subprocess, sys
+    target = Path(body.path).expanduser()
+    if not target.exists():
+        raise HTTPException(400, f"Path not found: {body.path}")
+    cmd = [sys.executable, str(ROOT / "ingest.py"), "--dir", str(target)]
+    if body.limit > 0:
+        cmd += ["--limit", str(body.limit)]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800, cwd=str(ROOT))
+        return {
+            "ok": result.returncode == 0,
+            "stdout": result.stdout[-2000:] if result.stdout else "",
+            "stderr": result.stderr[-1000:] if result.stderr else "",
+        }
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "Ingest timeout (>30min)"}
+
+
 # ── Export ────────────────────────────────────────────────────────────────────
 
 @app.get("/api/media/{media_id}/export/{fmt}")

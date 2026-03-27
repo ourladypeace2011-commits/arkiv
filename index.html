@@ -190,10 +190,13 @@ tailwind.config = {
 function toggleTheme() {
   const h = document.documentElement;
   const isDark = h.classList.contains('dark');
-  h.classList.toggle('dark', !isDark);
-  h.classList.toggle('light', isDark);
-  document.querySelectorAll('.dark-icon').forEach(el => el.style.display = isDark ? 'none' : 'block');
-  document.querySelectorAll('.light-icon').forEach(el => el.style.display = isDark ? 'block' : 'none');
+  if (isDark) { h.classList.remove('dark'); h.classList.add('light'); }
+  else { h.classList.remove('light'); h.classList.add('dark'); }
+  const nowDark = h.classList.contains('dark');
+  document.querySelectorAll('.dark-icon').forEach(el => el.style.display = nowDark ? 'block' : 'none');
+  document.querySelectorAll('.light-icon').forEach(el => el.style.display = nowDark ? 'none' : 'block');
+  document.body.style.background = nowDark ? '#1a1a1e' : '#f5f5f7';
+  document.body.style.color = nowDark ? '#e4e4e7' : '#1a1a1e';
 }
 </script>
 
@@ -616,8 +619,30 @@ function doPlayMedia(id) {
   }
 }
 
-function doAddMediaFolder() {
-  alert('請在終端執行：\n\ncd ~/.arkiv && source .venv/bin/activate\npython ingest.py --dir "/path/to/footage"\n\n灌入完成後重整頁面即可看到新素材。');
+async function doAddMediaFolder() {
+  const path = prompt('輸入素材資料夾路徑：\n\n例如：/Volumes/SSD/影片/\n或 ~/Movies/rushes/');
+  if (!path) return;
+  const limit = prompt('要處理幾個檔案？（0 = 全部，建議先試 3）', '3');
+  const btn = event?.target;
+  if (btn) btn.disabled = true;
+  try {
+    const el = document.getElementById('poolStats');
+    if (el) el.innerHTML = '<div class="text-warning text-2xs">Ingesting... 請稍候</div>';
+    const r = await fetch('/api/ingest', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({path, limit: parseInt(limit)||0})
+    });
+    const data = await r.json();
+    if (data.ok) {
+      alert('Ingest 完成！\n\n' + (data.stdout||'').slice(-500));
+      await refresh();
+      renderAnalytics();
+    } else {
+      alert('Ingest 失敗：\n' + (data.stderr || data.error || 'Unknown error'));
+    }
+  } catch(e) { alert('Ingest 錯誤：' + e.message); }
+  finally { if (btn) btn.disabled = false; await refresh(); }
 }
 
 async function doReIngest(id) {
