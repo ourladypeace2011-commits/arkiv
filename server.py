@@ -8,16 +8,43 @@ Usage:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
+from typing import Set
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import db
+
+
+# ── WebSocket connection manager ────────────────────────────────────────────
+class IngestBroadcaster:
+    """Manages WebSocket connections for ingest progress updates."""
+    def __init__(self):
+        self.connections: Set[WebSocket] = set()
+
+    async def connect(self, ws: WebSocket):
+        await ws.accept()
+        self.connections.add(ws)
+
+    def disconnect(self, ws: WebSocket):
+        self.connections.discard(ws)
+
+    async def broadcast(self, data: dict):
+        dead = set()
+        for ws in self.connections:
+            try:
+                await ws.send_json(data)
+            except Exception:
+                dead.add(ws)
+        self.connections -= dead
+
+ingest_ws = IngestBroadcaster()
 
 # ── Init ─────────────────────────────────────────────────────────────────────
 db.init_db()
@@ -422,6 +449,110 @@ def export_media(media_id: int, fmt: str):
         )
 
     raise HTTPException(400, f"Unsupported format: {fmt}. Use srt/vtt/txt/edl")
+
+
+# ── WebSocket: Ingest Progress ───────────────────────────────────────────
+
+@app.websocket("/ws/ingest")
+async def ws_ingest(ws: WebSocket):
+    """WebSocket endpoint for real-time ingest progress updates."""
+    await ingest_ws.connect(ws)
+    try:
+        while True:
+            await ws.receive_text()  # keep alive, client can send pings
+    except WebSocketDisconnect:
+        ingest_ws.disconnect(ws)
+
+
+async def _run_ingest_with_ws(target: Path, limit: int):
+    """Run ingest in a background task, broadcasting per-file progress via WebSocket."""
+    import subprocess, sys
+
+    # Scan files first
+    files = sorted(
+        f for f in target.rglob("*")
+        if f.suffix.lower() in MEDIA_EXTS
+    )
+    if limit > 0:
+        files = files[:limit]
+
+    total = len(files)
+    await ingest_ws.broadcast({"type": "start", "total": total})
+
+    ok, skipped, failed = 0, 0, 0
+    for i, f in enumerate(files):
+        already = db.is_processed(str(f)) if hasattr(db, "is_processed") else False
+        if already:
+            skipped += 1
+            await ingest_ws.broadcast({
+                "type": "file", "index": i + 1, "total": total,
+                "filename": f.name, "status": "skipped"
+            })
+            continue
+
+        # Broadcast scanning
+        await ingest_ws.broadcast({
+            "type": "file", "index": i + 1, "total": total,
+            "filename": f.name, "status": "scanning"
+        })
+
+        # Run single-file ingest via subprocess
+        cmd = [
+            sys.executable, str(ROOT / "ingest.py"),
+            "--dir", str(f.parent), "--limit", "1"
+        ]
+        try:
+            # Broadcast transcribing
+            await ingest_ws.broadcast({
+                "type": "file", "index": i + 1, "total": total,
+                "filename": f.name, "status": "transcribing"
+            })
+
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE, cwd=str(ROOT)
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=600)
+
+            if proc.returncode == 0:
+                ok += 1
+                await ingest_ws.broadcast({
+                    "type": "file", "index": i + 1, "total": total,
+                    "filename": f.name, "status": "done"
+                })
+            else:
+                failed += 1
+                await ingest_ws.broadcast({
+                    "type": "file", "index": i + 1, "total": total,
+                    "filename": f.name, "status": "error",
+                    "error": (stderr.decode() if stderr else "")[-200:]
+                })
+        except asyncio.TimeoutError:
+            failed += 1
+            await ingest_ws.broadcast({
+                "type": "file", "index": i + 1, "total": total,
+                "filename": f.name, "status": "error", "error": "timeout"
+            })
+        except Exception as e:
+            failed += 1
+            await ingest_ws.broadcast({
+                "type": "file", "index": i + 1, "total": total,
+                "filename": f.name, "status": "error", "error": str(e)
+            })
+
+    await ingest_ws.broadcast({
+        "type": "complete", "ok": ok, "skipped": skipped, "failed": failed
+    })
+
+
+@app.post("/api/ingest/ws")
+async def ingest_media_ws(body: IngestRequest):
+    """Trigger ingest with WebSocket progress broadcasting."""
+    target = Path(body.path).expanduser()
+    if not target.exists():
+        raise HTTPException(400, f"Path not found: {body.path}")
+    asyncio.create_task(_run_ingest_with_ws(target, body.limit))
+    return {"ok": True, "message": "Ingest started — connect to /ws/ingest for progress"}
 
 
 # ── Serve Frontend ───────────────────────────────────────────────────────────
