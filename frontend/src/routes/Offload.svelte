@@ -37,6 +37,11 @@
 
   // run progress
   let curDst = ''
+  // Which post-copy pass is running. The copy bar hits N/N long before the
+  // offload is finished — the MHL write and verify each re-read every byte
+  // and emit nothing of their own, so without this the UI looks hung.
+  let stage = '' // '' | 'mhl_write' | 'mhl_verify'
+  let stageFiles = 0
   let pTotal = 0
   let pDone = 0
   let pFailed = 0
@@ -134,6 +139,7 @@
     if (missing.length) { pushToast(`無法開始複製 — 缺少：${missing.join('、')}`, 'error'); return }
     err = ''; phase = 'running'; stopped = false
     curDst = ''; pTotal = 0; pDone = 0; pFailed = 0; recent = []; summary = null; doneCode = null
+    stage = ''; stageFiles = 0
     abortCtl = new AbortController()
     try {
       const res = await api.offloadRun({
@@ -158,7 +164,10 @@
             pDone++
             if (ev.status === 'failed') pFailed++
             recent = [{ name: ev.name, status: ev.status }, ...recent].slice(0, 8)
+          } else if (ev.type === 'phase') {
+            stage = ev.phase; stageFiles = ev.files || 0
           } else if (ev.type === 'done') {
+            stage = ''
             doneCode = ev.code
             summary = ev.summary || {}
             phase = 'done'
@@ -316,6 +325,16 @@
           {#if curDst}<Mono dim style="font-size:10px;">→ {curDst}</Mono>{/if}
           <div class="bar"><div class="barfill" class:fail={anyFailed} style="width:{phase === 'done' ? 100 : pct}%;"></div></div>
           <Mono dim style="font-size:10.5px;">{pDone}{pTotal ? `/${pTotal}` : ''} files{pFailed ? ` · ${pFailed} failed` : ''}</Mono>
+          {#if stage}
+            <div class="stagerow">
+              <span class="spin"></span>
+              <Mono style="font-size:10.5px;">
+                {stage === 'mhl_write' ? 'Writing MHL manifest' : 'Verifying MHL manifest'}
+                — hashing {stageFiles} files again. No per-file progress here; this
+                pass re-reads every byte and can take as long as the copy did.
+              </Mono>
+            </div>
+          {/if}
 
           <div class="rowsbox">
             {#each recent as r}
@@ -392,6 +411,10 @@
   .seg:disabled { opacity: 0.4; cursor: not-allowed; }
 
   .empty { padding: 24px 0; }
+  .stagerow { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+  .spin { width: 8px; height: 8px; border-radius: 50%; background: currentColor;
+          opacity: .35; animation: pulse 1.2s ease-in-out infinite; flex: none; }
+  @keyframes pulse { 0%, 100% { opacity: .2 } 50% { opacity: .8 } }
   .rowsbox { flex: 1; min-height: 0; overflow: auto; border-top: 1px solid var(--rule); margin-top: 2px; }
   .prow { display: grid; grid-template-columns: 1fr auto 1.1fr auto; gap: 8px; align-items: baseline; padding: 4px 0; border-bottom: 1px solid var(--surface-2); }
   .prow.file { grid-template-columns: 1fr auto; }
