@@ -38,9 +38,18 @@
 
   let manifest = null      // {video,audio,unsupported,total_size_mb}
   let total = 0, fresh = 0
+  // From /api/ingest/scan: {seconds, budget_s, stall_s, probed, of}.
+  // `seconds` is advisory — nothing is killed on it. What actually bounds
+  // the run is budget_s plus a stall watchdog the UI cannot see.
+  let estimate = null
   let scanning = false, starting = false, err = '', notice = ''
 
   $: gb = manifest ? (manifest.total_size_mb / 1024).toFixed(1) : null
+  const hhmm = (s) => {
+    if (!s || s < 60) return `${Math.max(1, Math.round(s || 0))} 秒`
+    const m = Math.round(s / 60)
+    return m < 60 ? `${m} 分` : `${Math.floor(m / 60)} 小時 ${m % 60} 分`
+  }
 
   // The header button has read "ESC · CANCEL" since this screen shipped, but the
   // key was never wired. Same fix as Offload's, minus its running-copy guard:
@@ -78,10 +87,10 @@
       pushToast('請先填來源資料夾路徑（Source · folder）', 'error')
       return
     }
-    err = ''; notice = ''; scanning = true; manifest = null
+    err = ''; notice = ''; scanning = true; manifest = null; estimate = null
     try {
       const d = await api.scanMedia(path.trim())
-      manifest = d.manifest; total = d.total; fresh = d.new
+      manifest = d.manifest; total = d.total; fresh = d.new; estimate = d.estimate || null
       if (total === 0) notice = '這個資料夾沒有可匯入的媒體檔。'
     } catch (e) { err = e.message } finally { scanning = false }
   }
@@ -250,7 +259,21 @@
           {#if manifest.unsupported.count}
             <div class="mrow skip"><span>Unsupp.</span><Mono dim>{manifest.unsupported.count}</Mono><Mono dim>skipped</Mono></div>
           {/if}
-          <div class="estimated"><Eyebrow>Estimated</Eyebrow><span class="pend">timing pending · brick 4</span></div>
+          <div class="estimated">
+            <Eyebrow>Estimated</Eyebrow>
+            {#if estimate}
+              <div class="estrow"><span>約需</span><Mono>{hhmm(estimate.seconds)}</Mono></div>
+              <div class="estrow dim"><span>上限</span><Mono dim>{hhmm(estimate.budget_s)}</Mono></div>
+              <Mono dim style="font-size:9.5px;line-height:1.5;display:block;margin-top:4px;">
+                依 {estimate.probed}/{estimate.of} 支的實際時長推算（成本由視覺分析的
+                幀數決定，不是由檔案數）。超過上限或連續
+                {hhmm(estimate.stall_s)}沒有進度會停止並告知原因；
+                已完成的素材都會留在庫裡，重跑接續。
+              </Mono>
+            {:else}
+              <span class="pend">掃描後顯示</span>
+            {/if}
+          </div>
         {/if}
         <div class="noticebox">
           <Mono dim style="font-size:10px;">◇ Notice<br/>Files are processed locally. Nothing leaves this machine. Offload never deletes the source.</Mono>
@@ -306,6 +329,9 @@
   .mtotal { padding-bottom: 8px; border-bottom: 1px solid var(--rule); margin-bottom: 4px; }
   .mrow { display: grid; grid-template-columns: 1fr auto auto; gap: 14px; padding: 5px 0; font-size: 12px; align-items: baseline; }
   .mrow.skip { color: var(--quiet); }
+  .estrow { display: flex; justify-content: space-between; align-items: baseline;
+            gap: 8px; font-size: 11px; margin-top: 2px; }
+  .estrow.dim { opacity: .65; }
   .estimated { margin-top: 10px; }
   .noticebox { margin-top: auto; border: 1px dashed var(--rule-hi); padding: 12px; line-height: 1.5; }
 
