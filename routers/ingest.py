@@ -142,6 +142,10 @@ def ingest_engines(
         "vision_models": vision_models,
         "vision_num_ctx": settings_store.vision_num_ctx(),
         "languages": _INGEST_LANGUAGES,
+        # Source shortcuts. The browser build has no folder picker at all
+        # (canPickFolder() needs window.__TAURI__), so on the web UI the only way
+        # to reach a long NAS path is to retype it every time.
+        "source_presets": settings_store.source_preset_list(),
     }
 
 
