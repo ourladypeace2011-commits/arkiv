@@ -611,3 +611,17 @@ if VECTOR_BACKEND == "pg" and not ARKIV_PG_DSN:
         "ARKIV_VECTOR_BACKEND=pg requires ARKIV_PG_DSN "
         "(e.g. postgresql://rag:PASSWORD@100.64.0.10:5433/rag)"
     )
+
+# ── Ingest 的兩道截止線（見 ingest_budget.py 的完整推導）─────────────────────
+# 係數來自 2026-09-06 的 200 支現場實測迴歸（n=33）：單檔秒 ≈ 5.0 + 5.6 × 幀數，
+# R² = 0.88。⚠️ M2 Max + qwen2.5vl:7b 上量的，換機器要重新量 —— 所以可用環境變數覆寫。
+INGEST_PER_FILE_SECONDS = float(os.getenv("ARKIV_INGEST_PER_FILE_SECONDS", "5.0"))
+INGEST_PER_FRAME_SECONDS = float(os.getenv("ARKIV_INGEST_PER_FRAME_SECONDS", "5.6"))
+# 預算 = 估值 × 這個係數。估值不是死線，這個乘積才是。
+INGEST_BUDGET_FACTOR = float(os.getenv("ARKIV_INGEST_BUDGET_FACTOR", "2.0"))
+# 下限：模型暖機一次就 ~100 秒，沒有下限的話最小的匯入反而最容易被誤殺。
+INGEST_BUDGET_FLOOR_SECONDS = float(os.getenv("ARKIV_INGEST_BUDGET_FLOOR", "1800"))
+# 可以沉默多久才算卡住。whisper 解碼期間完全不出聲，而最慢的路徑
+# （faster-whisper large-v3 在 CPU 上）實測 RTF 1.22 —— 門檻要隨最長的素材放大。
+INGEST_STALL_FLOOR_SECONDS = float(os.getenv("ARKIV_INGEST_STALL_FLOOR", "600"))
+INGEST_STALL_RTF = float(os.getenv("ARKIV_INGEST_STALL_RTF", "1.3"))
