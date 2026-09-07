@@ -28,6 +28,11 @@
   // brick 4 — real transcription pickers, options from /api/ingest/engines.
   // '' = use the backend default (no flag sent), so unchanged callers stay default.
   let engines = null
+  // Source shortcuts: [{label, path}]. The browser build has no folder picker
+  // (canPickFolder() needs window.__TAURI__), so without these the only way to
+  // reach a long NAS path on the web UI is to retype it every single time.
+  let presets = []
+  let presetNote = ''
   let whisperGuard = '' // '' = default preset; else mode int as string
   let language = ''     // '' = auto-detect; else whisper code
   // brick 4b — vision model picker. Unlike the per-run whisper preset above,
@@ -123,6 +128,25 @@
   // Persist the chosen vision model as the library default (vision.model), the
   // same setting SettingsLive writes. The next ingest picks it up via
   // settings.vision_model(). No per-run flag exists for vision (by design).
+  // Adding the shortcut from here rather than only in Settings: the moment you
+  // know a path is worth keeping is right after you typed it, not later in
+  // another screen.
+  async function savePreset() {
+    const val = path.trim()
+    if (!val) { presetNote = '先填路徑'; return }
+    if (presets.some((p) => p.path === val)) { presetNote = '這個路徑已在捷徑裡'; return }
+    const label = (val.replace(/\/+$/, '').split('/').pop() || val).slice(0, 24)
+    const next = [...presets, { label, path: val }]
+    presetNote = '儲存中…'
+    try {
+      await api.putSettings({
+        'ingest.source_presets': next.map((p) => `${p.label}|${p.path}`).join('; '),
+      })
+      presets = next
+      presetNote = `已加入捷徑「${label}」`
+    } catch (e) { presetNote = '儲存失敗' }
+  }
+
   async function saveVisionModel() {
     visionNote = '儲存中…'
     try { await api.putSettings({ 'vision.model': visionModel }); visionNote = '已設為全庫預設 ✓' }
@@ -139,6 +163,7 @@
       if (engines && engines.default_language) language = engines.default_language
       if (engines && typeof engines.default_recursive === 'boolean') opts.recursive = engines.default_recursive
       if (engines && engines.vision_model) visionModel = engines.vision_model
+      presets = engines?.source_presets ?? []
     } catch (e) { /* picker falls back to default-only */ }
     const h = window.location.hash
     const qi = h.indexOf('?')
@@ -184,6 +209,16 @@
               <button class="seg" on:click={browsePath} disabled={scanning} title="選擇資料夾">⋯</button>
             {/if}
             <button class="ak-btn" on:click={scan} disabled={scanning}>{scanning ? 'scanning…' : 'Scan'}</button>
+          </div>
+          <div class="presetrow">
+            {#each presets as p (p.path)}
+              <button class="seg preset" class:on={path.trim() === p.path}
+                      title={p.path} on:click={() => { path = p.path; scan() }}>{p.label}</button>
+            {/each}
+            <button class="seg preset add" on:click={savePreset}
+                    title="把目前路徑存成捷徑（存在 Settings 的 ingest.source_presets）">＋</button>
+            {#if presetNote}<Mono dim style="font-size:9.5px;">{presetNote}</Mono>
+            {:else if !presets.length}<Mono dim style="font-size:9.5px;">按 ＋ 把常用路徑存成捷徑</Mono>{/if}
           </div>
         </div>
 
@@ -318,6 +353,9 @@
   .sel:focus { outline: none; border-color: var(--ink); }
 
   .optrow { display: flex; align-items: center; gap: 14px; }
+  .presetrow { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 5px; }
+  .preset { font-size: 10px; padding: 2px 8px; }
+  .preset.add { font-weight: 600; }
   .optlabel { display: flex; flex-direction: column; gap: 1px; font-size: 12px; }
   .seg { font-family: var(--ak-mono); font-size: 10px; letter-spacing: 0.08em; width: 46px; flex: 0 0 46px; padding: 5px 0; border: 1px solid var(--rule-hi); background: transparent; color: var(--quiet); cursor: pointer; }
   .seg.on { background: var(--invert); color: var(--invert-ink); border-color: var(--invert); font-weight: 700; }
