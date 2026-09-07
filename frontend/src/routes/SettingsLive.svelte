@@ -569,14 +569,21 @@
             <div class="fshead">
               <Eyebrow style="margin-bottom:4px;">PROJECT REGISTRY · 專案註冊表</Eyebrow>
               <div class="ak-display fstitle">Projects</div>
-              <div class="fsdesc">跨庫專案登記——加入 / 移除 / 同步索引時間。寫入 <code>~/.arkiv-projects.json</code>。健康狀態來自 <code>/api/projects/health</code>。</div>
+              <div class="fsdesc">跨庫專案登記——加入 / 移除 / 同步索引時間。寫入 <code>~/.arkiv-projects.json</code>。健康狀態來自 <code>/api/projects/health</code>。<br />註冊表的用途是讓跨庫精選集能以名稱指認片段，<strong>不是素材庫的切換器</strong>——一個伺服器行程只服務一個素材庫。</div>
             </div>
+
+            <div class="pactive">
+              <span class="pactlabel">目前開啟</span>
+              <span class="pactname">{stats?.project_registered_name || stats?.project || '—'}</span>
+              {#if stats && !stats.project_registered_name}<span class="pactwarn">未註冊</span>{/if}
+            </div>
+            <div class="pacthint">要看別的素材庫，得用該路徑重新啟動後端（<code>ARKIV_PROJECT_ROOT</code>）；在這張表上新增或移除不會改變上面這一行。</div>
 
             <div class="ptable">
               <div class="phead"><span>NAME</span><span>PATH</span><span>INDEXED</span><span>HEALTH</span><span></span></div>
               {#each projects as p}
-                <div class="prow">
-                  <span class="pname">{p.name}</span>
+                <div class="prow" class:pcurrent={!!stats?.project_registered_name && p.name === stats.project_registered_name}>
+                  <span class="pname">{p.name}{#if !!stats?.project_registered_name && p.name === stats.project_registered_name}<span class="pdot" title="目前開啟中">●</span>{/if}</span>
                   <span class="ppath" title={p.path}>{p.path}</span>
                   <Mono dim style="font-size:10.5px;">{shortDate(p.last_indexed_at)}</Mono>
                   <span class="phealth" class:ok={projHealth[p.name] === 'ok'}>{projHealth[p.name] || '—'}</span>
@@ -715,4 +722,11 @@
   .phealth { font-family: var(--ak-mono); font-size: 10px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--quiet-2); }
   .phealth.ok { color: var(--cyan); }
   .paddrow { display: grid; grid-template-columns: 1.2fr 2fr 1.4fr; gap: 8px; margin-bottom: 12px; }
+  .pactive { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; }
+  .pactlabel { font-family: var(--ak-mono); font-size: 9px; letter-spacing: 0.08em; color: var(--quiet-2); text-transform: uppercase; }
+  .pactname { font-size: 13px; color: var(--ink); }
+  .pactwarn { font-family: var(--ak-mono); font-size: 10px; letter-spacing: 0.04em; color: var(--quiet-2); text-transform: uppercase; }
+  .pacthint { font-size: 11px; color: var(--quiet); margin-bottom: 10px; line-height: 1.5; }
+  .prow.pcurrent .pname { color: var(--cyan); }
+  .pdot { color: var(--cyan); font-size: 9px; margin-left: 5px; vertical-align: middle; }
 </style>
