@@ -585,18 +585,34 @@ def run_offload(src, dsts, hash_algo=DEFAULT_HASH, include_heic=False, resume=No
 
         dst_state["verified_files"] = len(verified_rel_paths)
         dst_state["failed_files"] = failed
-        dst_state["status"] = "done" if failed == 0 else "partial"
+        # The copy is done; the CARD is not. `status` stays "running" through the
+        # MHL passes below — writing "done" here is what let a run cancelled during
+        # those passes persist a state that says finished with `mhl_path: null`,
+        # which is indistinguishable from a real completion. For a DIT the manifest
+        # IS the deliverable (chain of custody), so "copied" must not read as "done".
+        final_status = "done" if failed == 0 else "partial"
         _save_state(state_path, state)
 
         mhl_path = None
         if emit_mhl and verified_rel_paths:
+            # Two full re-reads of every byte happen below (write, then verify) and
+            # neither emits anything on its own. Without these markers the UI sits
+            # on "file N/N" for as long as the hashing takes — 35 minutes for 89 GB
+            # in the 2026-09-06 field run — and looks hung while it is working.
+            _emit(progress, {"type": "phase", "dst": dst_key, "phase": "mhl_write",
+                             "files": len(verified_rel_paths)})
             mhl_path = _write_mhl(dst_root, hash_algo, op="offload")
             dst_state["mhl_path"] = str(mhl_path)
             _save_state(state_path, state)
             if verify:
+                _emit(progress, {"type": "phase", "dst": dst_key, "phase": "mhl_verify",
+                                 "files": len(verified_rel_paths)})
                 verify_result = _verify_emitted_mhl(dst_root, mhl_path)
                 if verify_result is not None and verify_result != 0:
                     raise RuntimeError("mhl verify failed for {0}: exit code {1}".format(mhl_path, verify_result))
+
+        dst_state["status"] = final_status
+        _save_state(state_path, state)
 
         summary[dst_key] = {
             "verified_files": len(verified_rel_paths),
