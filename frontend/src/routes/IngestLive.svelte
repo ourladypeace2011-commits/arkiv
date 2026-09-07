@@ -39,6 +39,10 @@
   let files = {} // index → {filename, status, stage}
   let stageCounts = {} // aggregate per-stage tally from the backend (counts dict)
   let complete = null // {ok, skipped, failed}
+  // Set when the server's watchdog stopped the run. Two kinds, and they need
+  // different words: 'stall' = no output for the threshold, probably wedged;
+  // 'budget' = still talking but past the estimated cap, probably just slow.
+  let halted = null // {reason, idle_s, elapsed_s, stall_s, budget_s}
   let log = [] // [{t, stage, text}]
   let busy = false
   let rebuilding = false
@@ -126,9 +130,17 @@
         files = files // trigger reactivity
         if (msg.counts) stageCounts = msg.counts
         pushLog(`${msg.filename}`, msg.stage)
+      } else if (msg.type === 'halted') {
+        halted = msg
+        pushLog(msg.reason === 'stall'
+          ? `HALTED · 已 ${Math.round(msg.idle_s / 60)} 分鐘沒有進度（門檻 ${Math.round(msg.stall_s / 60)} 分）`
+          : `HALTED · 已跑 ${Math.round(msg.elapsed_s / 60)} 分，超過上限 ${Math.round(msg.budget_s / 60)} 分`)
       } else if (msg.type === 'complete') {
         complete = { ok: msg.ok, skipped: msg.skipped, failed: msg.failed }
         busy = false
+        // A late-joining client never saw the 'halted' event; without this it
+        // would read a cut-short run as a finished one.
+        if (msg.halted && !halted) halted = { reason: msg.halted }
         pushLog(`complete · ok=${msg.ok} skipped=${msg.skipped} failed=${msg.failed}`)
       }
     }
@@ -140,6 +152,7 @@
     busy = true
     files = {}
     stageCounts = {}
+    halted = null
     complete = null
     try {
       // Through the authenticated API layer (adds the Bearer token when set) —
@@ -301,6 +314,31 @@
         {/if}
         {#if err}<Mono style="font-size:11px;color:var(--cyan);margin-top:8px;display:block;">{err}</Mono>{/if}
 
+        {#if halted}
+          <!-- The run was stopped by the server-side watchdog. This has to be
+               loud: the previous behaviour was that a wedged import simply sat
+               there, and "still working" looked exactly like "dead". -->
+          <div class="haltbox" role="alert">
+            <div class="halthead">
+              <Mono style="font-size:11px;font-weight:600;">
+                {halted.reason === 'stall' ? '匯入已停止 · 研判卡住' : '匯入已停止 · 超過預估上限'}
+              </Mono>
+            </div>
+            <Mono dim style="font-size:10.5px;line-height:1.65;display:block;">
+              {#if halted.reason === 'stall'}
+                已 {Math.round((halted.idle_s || 0) / 60)} 分鐘沒有任何進度輸出（門檻
+                {Math.round((halted.stall_s || 0) / 60)} 分鐘），整個處理程序已被停止。
+                可能是 ffmpeg 或視覺模型沒有回應 —— 先確認 ollama 還活著再重跑。
+              {:else}
+                已跑 {Math.round((halted.elapsed_s || 0) / 60)} 分鐘，超過本次的上限
+                {Math.round((halted.budget_s || 0) / 60)} 分鐘。它當時仍在輸出進度，
+                所以多半只是估值偏低而不是卡住。
+              {/if}
+              <br/><b>已完成的素材都已寫進素材庫，重跑會從中斷處接續。</b>
+            </Mono>
+          </div>
+        {/if}
+
         <div class="aggwrap">
           <div class="aggrow"><Mono dim style="font-size:10px;">AGGREGATE</Mono><Mono style="font-size:11px;font-weight:600;color:var(--cyan);">{pct}%</Mono></div>
           <div class="aggbar"><div class="aggfill" style="width:{pct}%;"></div><div class="aggmark" style="left:{pct}%;"></div></div>
@@ -384,6 +422,9 @@
   .pathinput { font-size: 12px; }
   .triggerrow { display: flex; gap: 8px; align-items: center; }
   .limitinput { width: 70px; font-size: 12px; }
+  .haltbox { margin-top: 10px; padding: 10px 12px; border-radius: 6px;
+             border: 1px solid var(--cyan); background: color-mix(in srgb, var(--cyan) 8%, transparent); }
+  .halthead { margin-bottom: 4px; }
   .aggwrap { margin-top: 22px; }
   .aggrow { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; }
   .aggbar { height: 4px; background: var(--surface-3); position: relative; }
