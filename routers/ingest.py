@@ -34,6 +34,7 @@ from pydantic import BaseModel
 import auth
 import config
 import db
+import ingest_budget
 import mediatypes
 import settings as settings_store
 from auth import require_scopes
@@ -142,7 +143,41 @@ def ingest_engines(
         "vision_models": vision_models,
         "vision_num_ctx": settings_store.vision_num_ctx(),
         "languages": _INGEST_LANGUAGES,
+        # Source shortcuts. The browser build has no folder picker at all
+        # (canPickFolder() needs window.__TAURI__), so on the web UI the only way
+        # to reach a long NAS path is to retype it every time.
+        "source_presets": settings_store.source_preset_list(),
     }
+
+
+def _probe_durations(paths, max_probe: int = 500):
+    """Duration per file, in the order given; None where it could not be read.
+
+    Bounded on two axes so a huge or a wedged folder cannot hang the scan:
+    at most `max_probe` files are actually probed (the estimator extrapolates the
+    rest from the median), and each ffprobe gets its own short timeout. A probe
+    that fails yields None rather than 0 — treating "unknown" as "zero seconds"
+    would shrink the budget, and a too-small budget kills healthy imports.
+    """
+    import subprocess
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _one(path):
+        try:
+            r = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "default=nw=1:nk=1", str(path)],
+                capture_output=True, text=True, timeout=15)
+            return float((r.stdout or "").strip())
+        except Exception:
+            return None
+
+    head = paths[:max_probe]
+    if not head:
+        return []
+    with ThreadPoolExecutor(max_workers=16) as ex:
+        out = list(ex.map(_one, head))
+    return out + [None] * (len(paths) - len(head))
 
 
 @router.post("/api/ingest/scan")
@@ -166,12 +201,65 @@ def scan_media(
             files.append({"name": f.name, "size_mb": round(f.stat().st_size / 1048576, 1), "path": str(f), "already": already})
         elif ext in UNSUPPORTED_STILL_EXTS:
             unsupp[ext] = unsupp.get(ext, 0) + 1
+    # Probe durations so the caller can be told how long this will take BEFORE it
+    # starts, and so the run's budget is derived from the actual material instead
+    # of a fixed number. ffprobe over a NAS measured 0.13s/file serially; a small
+    # pool brings 200 files to ~8s, which is worth it for an honest ETA.
+    pending = [f for f in files if not f["already"]]
+    durations = _probe_durations([f["path"] for f in pending])
+    for f, d in zip(pending, durations):
+        f["duration_s"] = d
+    est = ingest_budget.estimate_seconds(durations, n_files=len(pending))
+    known = [d for d in durations if d]
     return {
         "total": len(files),
-        "new": sum(1 for f in files if not f["already"]),
+        "new": len(pending),
         "manifest": _build_scan_manifest(files, unsupp),
         "files": files,
+        # Advisory only — the UI shows it, nothing is killed on it. What actually
+        # bounds the run is `budget_s` (and the stall watchdog, which this cannot see).
+        "estimate": {
+            "seconds": round(est),
+            "budget_s": round(ingest_budget.budget_seconds(est)),
+            "stall_s": round(ingest_budget.stall_seconds(max(known) if known else 0)),
+            "probed": len(known),
+            "of": len(pending),
+        },
     }
+
+def _ingest_limits(target: Path, limit: int = 0):
+    """(stall_seconds, budget_seconds) for this folder, from its own material.
+
+    Probing is best-effort: a folder we cannot read yields the floors, which are
+    the old behaviour plus a stall watchdog. Never let the estimate step be able
+    to fail the import it is only advising on.
+    """
+    try:
+        paths = []
+        for f in sorted(target.rglob("*")):
+            if f.is_file() and f.suffix.lower() in MEDIA_EXTS:
+                paths.append(str(f))
+        if limit and limit > 0:
+            paths = paths[:limit]
+        durations = _probe_durations(paths)
+        est = ingest_budget.estimate_seconds(durations, n_files=len(paths))
+        known = [d for d in durations if d]
+        return (ingest_budget.stall_seconds(max(known) if known else 0),
+                ingest_budget.budget_seconds(est))
+    except Exception:
+        return (config.INGEST_STALL_FLOOR_SECONDS, config.INGEST_BUDGET_FLOOR_SECONDS)
+
+
+def _timeout_detail(e) -> str:
+    mins = lambda s: int((s or 0) // 60)
+    if getattr(e, "kind", None) == "stall":
+        return ("匯入停滯：已 {0} 分鐘沒有任何進度輸出（門檻 {1} 分鐘），"
+                "研判卡住，已停止整個處理程序。已完成的素材都已寫進素材庫，"
+                "重跑會從中斷處接續。").format(mins(e.idle), mins(e.timeout))
+    return ("匯入超過預估時間的上限（{0} 分鐘）並被停止 —— 它當時仍在輸出進度，"
+            "所以多半只是估值偏低而非卡住。已完成的素材都已寫進素材庫，"
+            "重跑會從中斷處接續。").format(mins(e.timeout))
+
 
 @router.post("/api/ingest")
 def ingest_media(
@@ -191,10 +279,15 @@ def ingest_media(
     if not _acquire_ingest_slot():  # audit H3
         raise HTTPException(409, "已有匯入任務進行中，請稍候")
     try:
-        # run_tree, not subprocess.run: on timeout the whole ingest.py→ffmpeg/whisper
-        # tree is killed, not just the direct child (fable-audit round-5 #2 / #12).
+        # run_tree_watched, not a single wall-clock cap: the old fixed 1800s could
+        # not finish a 200-clip import (measured 94 minutes) yet was still too long
+        # to notice a wedged child. Two limits derived from the material itself —
+        # `stall` catches "hung", `budget` catches "estimate was wrong". Both kill
+        # the whole ingest.py→ffmpeg/whisper tree (fable-audit round-5 #2 / #12).
         import proctree
-        result = proctree.run_tree(cmd, timeout=1800, cwd=str(BASE_DIR))
+        stall_s, budget_s = _ingest_limits(target, body.limit)
+        result = proctree.run_tree_watched(
+            cmd, stall_timeout=stall_s, total_timeout=budget_s, cwd=str(BASE_DIR))
         payload = {
             "ok": result.returncode == 0,
             "stdout": result.stdout[-2000:] if result.stdout else "",
@@ -206,8 +299,12 @@ def ingest_media(
             # status-code monitors see it.
             return JSONResponse(status_code=500, content=payload)
         return payload
+    except proctree.TreeTimeout as e:
+        # The two kinds need different words: "stalled" means go look at the box,
+        # "over budget" means it was probably still working and can be resumed.
+        raise HTTPException(504, _timeout_detail(e))
     except subprocess.TimeoutExpired:
-        raise HTTPException(504, "匯入逾時（>30 分鐘）")  # audit L11: was 200 + ok:false
+        raise HTTPException(504, "匯入逾時")  # audit L11: was 200 + ok:false
     finally:
         _release_ingest_slot()
 
@@ -398,9 +495,16 @@ def _bg_ingest(dir_path: str) -> None:
     while time.time() < deadline:
         if _acquire_ingest_slot():
             try:
-                proctree.run_tree(
+                # Same two limits as the interactive route. This path swallows
+                # its exceptions (it is a background task with nobody to tell),
+                # so without a stall watchdog a wedged upload-ingest would hold
+                # the single-flight slot for the full budget and block every
+                # later import with a 409.
+                stall_s, budget_s = _ingest_limits(Path(dir_path))
+                proctree.run_tree_watched(
                     [sys.executable, str(BASE_DIR / "ingest.py"), "--dir", dir_path],
-                    timeout=1800,
+                    stall_timeout=stall_s,
+                    total_timeout=budget_s,
                     cwd=str(BASE_DIR),
                 )
             except Exception:
@@ -481,6 +585,22 @@ def _on_ingest_ws_done(task: "asyncio.Task") -> None:
         )
 
 
+def _kill_ingest_tree(proc) -> None:
+    """Kill the ingest subprocess AND its descendants (ffmpeg / whisper / ollama
+    client). `proc.kill()` alone leaves them running and holding the GPU."""
+    import signal as _signal
+    if os.name == "posix":
+        try:
+            os.killpg(os.getpgid(proc.pid), _signal.SIGKILL)
+            return
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        pass
+
+
 async def _run_ingest_with_ws(target: Path, limit: int, opts: Optional[list] = None):
     """Run ingest as a single subprocess, parse stdout for progress."""
     import re, sys
@@ -499,6 +619,11 @@ async def _run_ingest_with_ws(target: Path, limit: int, opts: Optional[list] = N
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT, cwd=str(BASE_DIR),
+        # Own session so the watchdog below can kill the WHOLE tree. Without it
+        # `proc.kill()` reaps ingest.py and orphans its ffmpeg/whisper children —
+        # the exact bug run_tree exists to prevent (fable-audit round-5 #2 / #12),
+        # which this path never had because it never had a timeout at all.
+        start_new_session=(os.name == "posix"),
         # brick 3: drive the structured per-stage progress protocol (own-line JSON
         # events) instead of parsing the compact inline `>probe` human markers.
         env={**os.environ, "ARKIV_STAGE_EVENTS": "1"},
@@ -506,6 +631,37 @@ async def _run_ingest_with_ws(target: Path, limit: int, opts: Optional[list] = N
         # raises inside the read loop; give pathological log lines 1MB headroom.
         limit=2 ** 20,
     )
+
+    # Two limits derived from the material (see ingest_budget). This path had NO
+    # timeout at all: a wedged child produced no EOF, so the read loop waited
+    # forever, the UI sat on its last event, and the single-flight slot stayed held.
+    stall_s, budget_s = await asyncio.to_thread(_ingest_limits, target, limit)
+    beat = {"at": time.monotonic()}
+    halted = {"reason": None}
+
+    async def _watchdog():
+        started = time.monotonic()
+        while True:
+            await asyncio.sleep(1.0)
+            if proc.returncode is not None:
+                return
+            now = time.monotonic()
+            idle, elapsed = now - beat["at"], now - started
+            if idle > stall_s:
+                halted["reason"] = "stall"
+            elif elapsed > budget_s:
+                halted["reason"] = "budget"
+            else:
+                continue
+            await ingest_ws.broadcast({
+                "type": "halted", "reason": halted["reason"],
+                "idle_s": round(idle), "elapsed_s": round(elapsed),
+                "stall_s": round(stall_s), "budget_s": round(budget_s),
+            })
+            _kill_ingest_tree(proc)
+            return
+
+    watchdog = asyncio.create_task(_watchdog())
 
     ok, skipped, failed = 0, 0, 0
     last_total = limit or 0
@@ -524,6 +680,9 @@ async def _run_ingest_with_ws(target: Path, limit: int, opts: Optional[list] = N
     # concurrent ingest. Always kill the subprocess on the way out.
     try:
         async for line in proc.stdout:
+            # Any byte counts as liveness. ingest.py flushes a marker at every
+            # stage, so silence really is "not progressing", not "buffered".
+            beat["at"] = time.monotonic()
             text = line.decode("utf-8", errors="replace").strip()
             if not text:
                 continue
@@ -604,8 +763,9 @@ async def _run_ingest_with_ws(target: Path, limit: int, opts: Optional[list] = N
 
         await proc.wait()
     finally:
+        watchdog.cancel()
         if proc.returncode is None:  # audit M3: loop exited abnormally — reap child
-            proc.kill()
+            _kill_ingest_tree(proc)
             await proc.wait()
     # Derive failed from the observed total (not `limit`, which is 0 for "all"
     # and overstates when it exceeds the real file count) and surface the exit
@@ -616,7 +776,11 @@ async def _run_ingest_with_ws(target: Path, limit: int, opts: Optional[list] = N
 
     await ingest_ws.broadcast({
         "type": "complete", "ok": ok, "skipped": skipped, "failed": failed,
-        "returncode": rc
+        "returncode": rc,
+        # Carried on `complete` as well as the earlier `halted`: a client that
+        # connected late, or missed the event, must still learn this run was cut
+        # short rather than read a partial result as a finished one.
+        "halted": halted["reason"],
     })
 
 
