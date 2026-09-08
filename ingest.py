@@ -392,7 +392,15 @@ def probe(path: str) -> Optional[Dict]:
                 if "rotation" in sd:
                     try: rot = abs(int(sd["rotation"]))
                     except (ValueError, TypeError): pass
-        if rot in (90, 270):
+        if rot:
+            # Surfacing, not silence: a rotation flag is the one piece of
+            # geometry we take on trust from the file, and when it is wrong
+            # every artifact below it is wrong too with nothing to show for it.
+            print("  [rotation] {0}: metadata says {1}° — {2}".format(
+                os.path.basename(path), rot,
+                "ignored (ARKIV_IGNORE_ROTATION=1)"
+                if getattr(config, "IGNORE_ROTATION", False) else "applied"))
+        if rot in (90, 270) and not getattr(config, "IGNORE_ROTATION", False):
             w, h = h, w
 
     return {

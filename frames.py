@@ -210,8 +210,11 @@ def _extract_frame_to(video_path: str, t: float, out: Path) -> bool:
     # to be a real photo used to land with no thumbnail and no frames while
     # .png / .webp came through fine. Omit the seek entirely for stills.
     seek = [] if _is_still_raster(video_path) else ["-ss", str(t)]
+    # -noautorotate must precede -i: it is a demuxer option, so after the input
+    # it is silently ignored and the frame still comes out rotated.
+    norot = ["-noautorotate"] if getattr(config, "IGNORE_ROTATION", False) else []
     cmd = (
-        [config.FFMPEG_PATH] + seek + ["-i", video_path]
+        [config.FFMPEG_PATH] + norot + seek + ["-i", video_path]
         + _frame_vf_args(video_path)
         + ["-frames:v", "1", str(tmp), "-y"]
     )

@@ -371,6 +371,21 @@ def _detect_ffmpeg_tool(tool: str, env_var: str) -> str:
 
 
 FFMPEG_PATH = _detect_ffmpeg_tool("ffmpeg", "ARKIV_FFMPEG_PATH")
+
+# Ignore the container's rotation metadata (display matrix / tags.rotate).
+#
+# Cameras write that flag from an orientation sensor, and the sensor can be
+# wrong — a body on a gimbal, or pointed steeply up/down, can record a 90°
+# flag over footage that is already correctly framed landscape. Honouring it
+# then rotates good footage into a sideways, pillarboxed mess, and because the
+# swap happens at ingest every downstream artifact inherits it: stored
+# width/height, thumbnails, the frames vision reads, and proxies. Nothing
+# errors — the vision descriptions come back plausible-sounding for a sideways
+# image, so the damage is invisible in the data.
+#
+# Off by default: genuinely vertical footage exists and its flag is correct.
+# Turn it on per-ingest for a shoot you have confirmed is mis-flagged.
+IGNORE_ROTATION = os.getenv("ARKIV_IGNORE_ROTATION", "0").lower() in ("1", "true", "yes")
 FFPROBE_PATH = _detect_ffmpeg_tool("ffprobe", "ARKIV_FFPROBE_PATH")
 
 import platform as _plat
