@@ -630,13 +630,41 @@ if VECTOR_BACKEND == "pg" and not ARKIV_PG_DSN:
 # ── Ingest 的兩道截止線（見 ingest_budget.py 的完整推導）─────────────────────
 # 係數來自 2026-09-06 的 200 支現場實測迴歸（n=33）：單檔秒 ≈ 5.0 + 5.6 × 幀數，
 # R² = 0.88。⚠️ M2 Max + qwen2.5vl:7b 上量的，換機器要重新量 —— 所以可用環境變數覆寫。
-INGEST_PER_FILE_SECONDS = float(os.getenv("ARKIV_INGEST_PER_FILE_SECONDS", "5.0"))
-INGEST_PER_FRAME_SECONDS = float(os.getenv("ARKIV_INGEST_PER_FRAME_SECONDS", "5.6"))
+def _ingest_num(name, default, lo=None):
+    """Read a tuning constant without letting a typo take down the process.
+
+    These are bare `float(os.getenv(...))` at import time, and every module in
+    the codebase imports config — so `ARKIV_INGEST_BUDGET_FLOOR=30m` does not
+    produce a bad budget, it produces an API that will not start, with a
+    ValueError from config.py as the only clue. This file already solves that
+    three other ways (see _read_vision_num_ctx / _read_subtitle_max_cjk / the
+    GPU_MEM_THRESHOLD try-except); this matches them.
+
+    `lo` also guards the values that are nonsense rather than unparseable:
+    a BUDGET_FACTOR below 1.0 makes the budget smaller than the estimate it is
+    supposed to be a safety margin over.
+    """
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        print("[config] {0}={1!r} is not a number — using {2}".format(name, raw, default))
+        return default
+    if lo is not None and v < lo:
+        print("[config] {0}={1} below the {2} floor — using {2}".format(name, v, lo))
+        return lo
+    return v
+
+
+INGEST_PER_FILE_SECONDS = _ingest_num("ARKIV_INGEST_PER_FILE_SECONDS", 5.0, lo=0.0)
+INGEST_PER_FRAME_SECONDS = _ingest_num("ARKIV_INGEST_PER_FRAME_SECONDS", 5.6, lo=0.0)
 # 預算 = 估值 × 這個係數。估值不是死線，這個乘積才是。
-INGEST_BUDGET_FACTOR = float(os.getenv("ARKIV_INGEST_BUDGET_FACTOR", "2.0"))
+INGEST_BUDGET_FACTOR = _ingest_num("ARKIV_INGEST_BUDGET_FACTOR", 2.0, lo=1.0)
 # 下限：模型暖機一次就 ~100 秒，沒有下限的話最小的匯入反而最容易被誤殺。
-INGEST_BUDGET_FLOOR_SECONDS = float(os.getenv("ARKIV_INGEST_BUDGET_FLOOR", "1800"))
+INGEST_BUDGET_FLOOR_SECONDS = _ingest_num("ARKIV_INGEST_BUDGET_FLOOR", 1800, lo=0.0)
 # 可以沉默多久才算卡住。whisper 解碼期間完全不出聲，而最慢的路徑
 # （faster-whisper large-v3 在 CPU 上）實測 RTF 1.22 —— 門檻要隨最長的素材放大。
-INGEST_STALL_FLOOR_SECONDS = float(os.getenv("ARKIV_INGEST_STALL_FLOOR", "600"))
-INGEST_STALL_RTF = float(os.getenv("ARKIV_INGEST_STALL_RTF", "1.3"))
+INGEST_STALL_FLOOR_SECONDS = _ingest_num("ARKIV_INGEST_STALL_FLOOR", 600, lo=0.0)
+INGEST_STALL_RTF = _ingest_num("ARKIV_INGEST_STALL_RTF", 1.3, lo=0.0)

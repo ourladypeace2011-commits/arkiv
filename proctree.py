@@ -136,6 +136,11 @@ def run_tree_watched(
         "stderr": subprocess.STDOUT,   # merged: any output is liveness
         "text": True,
         "bufsize": 1,
+        # run_tree takes encoding/errors; this one did not, so a single
+        # non-UTF-8 byte raised inside the pump thread. Not decoding strictly is
+        # the right default here because the output is a liveness signal, not
+        # data — losing a character beats losing the reader.
+        "errors": "replace",
     }
     if cwd is not None:
         popen_kwargs["cwd"] = cwd
@@ -160,8 +165,16 @@ def run_tree_watched(
                         on_line(line)
                     except Exception:
                         pass
-        except Exception:
-            pass
+        except Exception as e:
+            # A dead pump is worse than a lost line: nobody drains the pipe, the
+            # child blocks on write once the buffer fills, state["last"] stops
+            # advancing, and the watchdog kills a perfectly healthy run while
+            # reporting it as stalled. UnicodeDecodeError is the realistic cause
+            # (ffmpeg/whisper emitting one non-UTF-8 byte, a cp950 progress bar
+            # on the Windows box) — the Popen below now decodes with
+            # errors="replace" so it cannot happen, and this records anything
+            # else instead of vanishing.
+            state["pump_error"] = "{0}: {1}".format(type(e).__name__, e)
 
     pump = threading.Thread(target=_pump, daemon=True)
     pump.start()

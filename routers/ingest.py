@@ -220,12 +220,32 @@ def scan_media(
         # bounds the run is `budget_s` (and the stall watchdog, which this cannot see).
         "estimate": {
             "seconds": round(est),
-            "budget_s": round(ingest_budget.budget_seconds(est)),
+            # 同一個 max_duration 要餵進去，否則 UI 顯示的「上限 X 分」
+            # 跟實際執行時 _ingest_limits 算出來的不是同一個數字。
+            "budget_s": round(ingest_budget.budget_seconds(
+                est, max_duration_s=(max(known) if known else 0))),
             "stall_s": round(ingest_budget.stall_seconds(max(known) if known else 0)),
             "probed": len(known),
             "of": len(pending),
         },
     }
+
+
+def _unprocessed_first(paths):
+    """Order paths so the ones ingest.py will actually touch come first.
+
+    Best-effort: if the DB cannot be read we return the input unchanged, because
+    a wrong order only makes the budget as wrong as it already was, whereas
+    raising here would take down a request that has nothing to do with budgets.
+    """
+    try:
+        import db as _db
+        with _db.get_conn() as conn:
+            done = {r[0] for r in conn.execute("SELECT path FROM media")}
+    except Exception:
+        return paths
+    return [p for p in paths if p not in done] + [p for p in paths if p in done]
+
 
 def _ingest_limits(target: Path, limit: int = 0):
     """(stall_seconds, budget_seconds) for this folder, from its own material.
@@ -240,12 +260,18 @@ def _ingest_limits(target: Path, limit: int = 0):
             if f.is_file() and f.suffix.lower() in MEDIA_EXTS:
                 paths.append(str(f))
         if limit and limit > 0:
-            paths = paths[:limit]
+            # ingest.py --limit N processes the first N *unprocessed* files, so
+            # slicing the full listing budgets for the wrong set: a folder whose
+            # first 400 clips are already indexed 10-second takes and whose last
+            # 100 are 30-minute interviews gets a budget derived from the takes,
+            # then spends it on the interviews and is killed mid-run.
+            paths = _unprocessed_first(paths)[:limit]
         durations = _probe_durations(paths)
         est = ingest_budget.estimate_seconds(durations, n_files=len(paths))
         known = [d for d in durations if d]
-        return (ingest_budget.stall_seconds(max(known) if known else 0),
-                ingest_budget.budget_seconds(est))
+        mx = max(known) if known else 0
+        return (ingest_budget.stall_seconds(mx),
+                ingest_budget.budget_seconds(est, max_duration_s=mx))
     except Exception:
         return (config.INGEST_STALL_FLOOR_SECONDS, config.INGEST_BUDGET_FLOOR_SECONDS)
 
@@ -587,14 +613,21 @@ def _on_ingest_ws_done(task: "asyncio.Task") -> None:
 
 def _kill_ingest_tree(proc) -> None:
     """Kill the ingest subprocess AND its descendants (ffmpeg / whisper / ollama
-    client). `proc.kill()` alone leaves them running and holding the GPU."""
-    import signal as _signal
-    if os.name == "posix":
-        try:
-            os.killpg(os.getpgid(proc.pid), _signal.SIGKILL)
-            return
-        except (ProcessLookupError, PermissionError, OSError):
-            pass
+    client). `proc.kill()` alone leaves them running and holding the GPU.
+
+    Delegates to proctree._kill_tree rather than reimplementing it. This *was* a
+    third hand-rolled copy whose non-POSIX branch fell straight through to
+    proc.kill() — no taskkill /F /T — so on Windows the watchdog reaped ingest.py
+    and orphaned its ffmpeg/whisper grandchildren. proctree's own docstring
+    predicted exactly this ("the Windows branch in particular is easy to fix on
+    one side only"); the drift arrived in the same change that wrote it.
+    """
+    try:
+        import proctree
+        proctree._kill_tree(proc)
+        return
+    except Exception:
+        pass
     try:
         proc.kill()
     except ProcessLookupError:
@@ -653,12 +686,21 @@ async def _run_ingest_with_ws(target: Path, limit: int, opts: Optional[list] = N
                 halted["reason"] = "budget"
             else:
                 continue
+            # Re-check immediately before acting: the broadcast below is an
+            # await, and a run that finishes during it would otherwise be
+            # reported as HALTED *and* have its already-reaped pid passed to
+            # killpg — which on pid reuse signals an unrelated process group.
+            # The final phase (embedding / index rebuild) is silent, so this is
+            # precisely when a healthy run looks stalled.
+            if proc.returncode is not None:
+                halted.pop("reason", None)
+                return
+            _kill_ingest_tree(proc)
             await ingest_ws.broadcast({
                 "type": "halted", "reason": halted["reason"],
                 "idle_s": round(idle), "elapsed_s": round(elapsed),
                 "stall_s": round(stall_s), "budget_s": round(budget_s),
             })
-            _kill_ingest_tree(proc)
             return
 
     watchdog = asyncio.create_task(_watchdog())
