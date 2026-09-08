@@ -199,7 +199,14 @@ def run_tree_watched(
             proc.stdout.close()
         except Exception:
             pass
-        return subprocess.CompletedProcess(list(cmd), proc.returncode, "".join(chunks), "")
+        # stderr is merged into stdout above, so this field can never carry the
+        # child's error output — and /api/ingest presents it verbatim as the
+        # diagnostic field. A permanently-empty diagnostic is worse than none:
+        # it reads as "the child said nothing". The one thing that genuinely has
+        # no other channel is a pump crash (round 1 stopped swallowing it, but
+        # nobody read what it recorded), so that is what goes here.
+        return subprocess.CompletedProcess(
+            list(cmd), proc.returncode, "".join(chunks), state.get("pump_error", ""))
 
     _kill_tree(proc)
     pump.join(timeout=10)
@@ -213,7 +220,7 @@ def run_tree_watched(
         stall_timeout if kind == "stall" else total_timeout,
         kind,
         output="".join(chunks),
-        stderr="",
+        stderr=state.get("pump_error", ""),
         elapsed=now - started,
         idle=now - state["last"],
     )

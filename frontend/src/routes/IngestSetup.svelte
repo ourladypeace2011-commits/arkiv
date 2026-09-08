@@ -131,10 +131,27 @@
   // Adding the shortcut from here rather than only in Settings: the moment you
   // know a path is worth keeping is right after you typed it, not later in
   // another screen.
+  // `ingest.source_presets` is one flat string: entries split on ';', label and
+  // path split on the first '|'. Neither character is escaped, and both are legal
+  // in a macOS folder name — so a path containing one does not merely lose its
+  // own shortcut. This writer re-serialises the WHOLE list from `presets`, and
+  // `presets` came back through that same lossy parser, so adding any shortcut
+  // rewrites every previously-mangled entry into its mangled form permanently.
+  // The settings docstring's promise that "losing one shortcut is recoverable"
+  // stops being true at exactly that point. Refuse the unrepresentable path
+  // instead, and say which character is the problem.
+  const PRESET_UNSAFE = /[;|]/
   async function savePreset() {
     const val = path.trim()
     if (!val) { presetNote = '先填路徑'; return }
     if (presets.some((p) => p.path === val)) { presetNote = '這個路徑已在捷徑裡'; return }
+    const bad = val.match(PRESET_UNSAFE)
+    if (bad) { presetNote = `路徑含有「${bad[0]}」，捷徑格式存不了這個字元`; return }
+    if (presets.some((p) => PRESET_UNSAFE.test(p.path) || PRESET_UNSAFE.test(p.label))) {
+      // Writing now would persist the damage to the existing entries too.
+      presetNote = '既有捷徑裡有「;」或「|」，請先到 Settings 修好再新增'
+      return
+    }
     const label = (val.replace(/\/+$/, '').split('/').pop() || val).slice(0, 24)
     const next = [...presets, { label, path: val }]
     presetNote = '儲存中…'

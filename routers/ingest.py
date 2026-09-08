@@ -150,34 +150,75 @@ def ingest_engines(
     }
 
 
+# ffprobe over a NAS measured 0.13s/file; /api/ingest/scan probes the folder to
+# show an ETA and then the run probes THE SAME FILES AGAIN to derive its budget.
+# A clip's duration cannot change without its size or mtime changing, so this
+# memoises on exactly that. Bounded so a long-lived server cannot grow it without
+# limit; the eviction is crude because a wrong eviction only costs one re-probe.
+_PROBE_CACHE: dict = {}
+_PROBE_CACHE_MAX = 20000
+
+
+def _probe_key(path):
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (str(path), st.st_size, int(st.st_mtime))
+
+
 def _probe_durations(paths, max_probe: int = 500):
     """Duration per file, in the order given; None where it could not be read.
 
     Bounded on two axes so a huge or a wedged folder cannot hang the scan:
-    at most `max_probe` files are actually probed (the estimator extrapolates the
-    rest from the median), and each ffprobe gets its own short timeout. A probe
-    that fails yields None rather than 0 — treating "unknown" as "zero seconds"
-    would shrink the budget, and a too-small budget kills healthy imports.
+    at most `max_probe` files are actually probed, and each ffprobe gets its own
+    short timeout. A probe that fails yields None rather than 0 — treating
+    "unknown" as "zero seconds" would shrink the budget, and a too-small budget
+    kills healthy imports.
+
+    The `max_probe` sample is taken EVENLY across the list, not off the head.
+    `stall_seconds` scales the silence threshold by `max(known)`, and whisper is
+    silent for the whole decode of a single clip — so the one number that must
+    not be missed is the longest clip. Probing the alphabetical first 500 of a
+    2000-clip folder makes the 40-minute interview at position 1200 invisible,
+    and the stall watchdog then kills a healthy import in the middle of
+    transcribing it. An even stride costs nothing and samples the whole folder.
     """
     import subprocess
     from concurrent.futures import ThreadPoolExecutor
 
     def _one(path):
+        key = _probe_key(path)
+        if key is not None and key in _PROBE_CACHE:
+            return _PROBE_CACHE[key]
         try:
             r = subprocess.run(
                 ["ffprobe", "-v", "error", "-show_entries", "format=duration",
                  "-of", "default=nw=1:nk=1", str(path)],
                 capture_output=True, text=True, timeout=15)
-            return float((r.stdout or "").strip())
+            val = float((r.stdout or "").strip())
         except Exception:
-            return None
+            return None  # not cached: a failure can be transient (NAS asleep)
+        if key is not None:
+            if len(_PROBE_CACHE) >= _PROBE_CACHE_MAX:
+                _PROBE_CACHE.clear()
+            _PROBE_CACHE[key] = val
+        return val
 
-    head = paths[:max_probe]
-    if not head:
+    n = len(paths)
+    if not n:
         return []
+    if n <= max_probe:
+        idxs = list(range(n))
+    else:
+        stride = n / float(max_probe)
+        idxs = sorted({min(n - 1, int(i * stride)) for i in range(max_probe)})
     with ThreadPoolExecutor(max_workers=16) as ex:
-        out = list(ex.map(_one, head))
-    return out + [None] * (len(paths) - len(head))
+        probed = list(ex.map(_one, [paths[i] for i in idxs]))
+    out = [None] * n
+    for i, d in zip(idxs, probed):
+        out[i] = d
+    return out
 
 
 @router.post("/api/ingest/scan")
@@ -231,13 +272,25 @@ def scan_media(
     }
 
 
-def _unprocessed_first(paths):
-    """Order paths so the ones ingest.py will actually touch come first.
+def _unprocessed(paths):
+    """The paths ingest.py will actually touch — already-indexed ones dropped.
 
     Best-effort: if the DB cannot be read we return the input unchanged, because
-    a wrong order only makes the budget as wrong as it already was, whereas
-    raising here would take down a request that has nothing to do with budgets.
+    an over-wide budget is only as wrong as it already was, whereas raising here
+    would take down a request that has nothing to do with budgets.
     """
+    try:
+        import db as _db
+        with _db.get_conn() as conn:
+            done = {r[0] for r in conn.execute("SELECT path FROM media")}
+    except Exception:
+        return list(paths)
+    return [p for p in paths if p not in done]
+
+
+def _unprocessed_first(paths):
+    """Order-preserving variant: unprocessed first, processed after. Kept because
+    a caller that must not lose entries needs the reordering, not the filter."""
     try:
         import db as _db
         with _db.get_conn() as conn:
@@ -259,13 +312,22 @@ def _ingest_limits(target: Path, limit: int = 0):
         for f in sorted(target.rglob("*")):
             if f.is_file() and f.suffix.lower() in MEDIA_EXTS:
                 paths.append(str(f))
+        # ingest.py SKIPs anything already indexed, in both modes. Budgeting the
+        # full listing therefore prices work that will never happen — and it made
+        # /api/ingest/scan's comment ("同一個 max_duration 要餵進去，否則 UI 顯示
+        # 的『上限 X 分』跟實際執行時算出來的不是同一個數字") false for the
+        # limit=0 path the UI actually uses: scan estimates over `pending`, this
+        # estimated over everything. Re-importing into a 5000-clip library showed
+        # an ETA from the 3 new files and ran on a budget from all 5000.
+        pending = _unprocessed(paths)
         if limit and limit > 0:
             # ingest.py --limit N processes the first N *unprocessed* files, so
             # slicing the full listing budgets for the wrong set: a folder whose
             # first 400 clips are already indexed 10-second takes and whose last
             # 100 are 30-minute interviews gets a budget derived from the takes,
             # then spends it on the interviews and is killed mid-run.
-            paths = _unprocessed_first(paths)[:limit]
+            pending = pending[:limit]
+        paths = pending
         durations = _probe_durations(paths)
         est = ingest_budget.estimate_seconds(durations, n_files=len(paths))
         known = [d for d in durations if d]
@@ -292,7 +354,19 @@ def ingest_media(
     body: IngestRequest,
     _tok: dict = Depends(require_scopes("ingest_write")),
 ):
-    """Trigger ingest from the web UI — runs ingest.py as subprocess."""
+    """Trigger ingest — runs ingest.py as a subprocess and blocks until it ends.
+
+    ⚠️ Not the UI's path (the SPA uses POST /api/ingest/ws + the /ws/ingest
+    stream). This one is for MCP/CLI callers, and it is synchronous in three
+    senses at once, for as long as `budget_s` — which is derived from the
+    material and was 94 minutes for the 200-clip field run: it holds one anyio
+    threadpool worker, one HTTP connection, and the single-flight ingest slot.
+    A caller whose own timeout is shorter gets nothing back AND cannot retry
+    (409) until the run it can no longer see finishes. Nothing here can detect
+    that disconnect — a sync route has no equivalent of the offload stream's
+    GeneratorExit. Long imports belong on the WS route; this stays for small,
+    scripted ones.
+    """
     import subprocess, sys
     target = Path(body.path).expanduser().resolve()
     if not target.is_dir():
