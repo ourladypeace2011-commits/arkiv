@@ -63,14 +63,29 @@ def estimate_seconds(durations: Iterable[Optional[float]], n_files: Optional[int
             + total_frames * config.INGEST_PER_FRAME_SECONDS)
 
 
-def budget_seconds(estimate_s: float) -> float:
-    """總預算 —— 估值乘安全係數，並有下限。
+def budget_seconds(estimate_s: float, max_duration_s: Optional[float] = None) -> float:
+    """總預算 —— 估值乘安全係數，並有兩道下限。
 
-    下限存在的理由：小批次的估值可能只有幾十秒，而模型暖機一次就要 ~100 秒。
+    下限一：小批次的估值可能只有幾十秒，而模型暖機一次就要 ~100 秒。
     沒有下限的話，最小的匯入反而最容易被誤殺。
+
+    🔴 下限二（`max_duration_s`）：預算不得低於同一批的 stall 門檻。
+
+    estimate_seconds() 只模型化了 vision 的每幀成本 —— 時長僅透過幀數影響它，
+    轉錄時間完全沒進去。而 stall_seconds() 明白知道轉錄跟片長成正比（它自己
+    的註解引 RTF 1.22）。兩個函式對同一件成本的模型互相矛盾，結果是：
+
+        一支 2 小時的片 → budget 46 分，stall 156 分
+
+    預算比「這一批被允許的沉默」還短 3.4 倍，所以長素材必然在還健康地轉錄時
+    就被判 budget 超時，而 stall 那條路徑對超過 ~23 分鐘的素材是不可達的
+    dead code。傳入 max_duration_s 讓預算至少涵蓋 stall 容許的等待。
     """
-    return max(config.INGEST_BUDGET_FLOOR_SECONDS,
-               estimate_s * config.INGEST_BUDGET_FACTOR)
+    floor = config.INGEST_BUDGET_FLOOR_SECONDS
+    if max_duration_s:
+        # 同一批最長素材的 stall 門檻 + 一趟估值，才是「合理的最壞情況」
+        floor = max(floor, stall_seconds(max_duration_s) + estimate_s)
+    return max(floor, estimate_s * config.INGEST_BUDGET_FACTOR)
 
 
 def stall_seconds(max_duration_s: Optional[float]) -> float:
