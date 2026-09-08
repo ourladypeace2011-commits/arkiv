@@ -67,7 +67,9 @@
   // every refusal names its reason.
   $: previewed = phase === 'preview' || (phase === 'done' && stopped)
   $: pct = pTotal ? Math.min(100, Math.round((pDone / pTotal) * 100)) : 0
-  $: anyFailed = summary ? Object.values(summary).some((s) => s.failed_files > 0) || doneCode !== 0 : false
+  $: anyFailed = summary
+    ? Object.values(summary).some((s) => s.failed_files > 0 || s.error) || doneCode !== 0
+    : false
   const base = (p) => String(p).split(/[\\/]/).pop()
 
   function addDst() { dsts = [...dsts, ''] }
@@ -159,13 +161,22 @@
           if (!line) continue
           let ev; try { ev = JSON.parse(line) } catch { continue }
           if (ev.type === 'dst_start') {
+            // stage/stageFiles belong to the destination that just ENDED. With
+            // more than one --dst (card → two drives, the normal DIT setup) the
+            // last event of drive 1 is phase:mhl_verify, so leaving it set makes
+            // drive 2's copy render as "Verifying MHL manifest" until drive 2
+            // emits a phase of its own — a stuck label over live file progress.
             curDst = ev.dst; pTotal = ev.total; pDone = 0; pFailed = 0
+            stage = ''; stageFiles = 0
           } else if (ev.type === 'file') {
             pDone++
             if (ev.status === 'failed') pFailed++
             recent = [{ name: ev.name, status: ev.status }, ...recent].slice(0, 8)
           } else if (ev.type === 'phase') {
+            // mhl_failed is terminal for this destination: keep the row's own
+            // error visible rather than showing a hashing pass that already died.
             stage = ev.phase; stageFiles = ev.files || 0
+            if (ev.phase === 'mhl_failed') pushToast(`MHL 失敗 · ${ev.dst}：${ev.error || ''}`, 'error')
           } else if (ev.type === 'done') {
             stage = ''
             doneCode = ev.code
@@ -350,7 +361,7 @@
               {#each Object.entries(summary) as [dst, s]}
                 <div class="srow" class:fail={s.failed_files > 0}>
                   <Mono style="font-size:10.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{base(dst)}</Mono>
-                  <Mono dim style="font-size:10px;">{s.verified_files} ok{s.failed_files ? ` · ${s.failed_files} fail` : ''}{s.mhl_path ? ' · MHL' : ''}</Mono>
+                  <Mono dim style="font-size:10px;">{s.verified_files} ok{s.failed_files ? ` · ${s.failed_files} fail` : ''}{s.mhl_path ? ' · MHL' : ''}{s.error ? ` · MHL 失敗：${s.error}` : ''}</Mono>
                 </div>
               {/each}
             </div>

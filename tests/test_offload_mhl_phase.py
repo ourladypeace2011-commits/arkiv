@@ -99,6 +99,11 @@ def test_status_is_not_done_when_mhl_write_fails(scratch, monkeypatch):
     """🔴 本檔的核心：MHL 沒寫成，state 就不可以說 done。
 
     這是「取消在那 35 分鐘裡」的可測代理 —— 兩者都是「拷完了但 manifest 沒有」。
+
+    ⚠️ 2026-09-08 審計 round 2：原本這裡是 `pytest.raises(RuntimeError)` ——
+    失敗會 raise 出整個 dst 迴圈。那讓本檔的核心成立了，但代價是**剩下的目的地
+    一顆都不會拷**，而第二顆碟正是兩碟備份的全部意義。現在失敗收斂在這顆碟裡，
+    所以核心命題從「不是 done」升級成更強的「明確是 failed，而且說得出原因」。
     """
     offload = _bootstrap_mhl(scratch, monkeypatch)
     monkeypatch.chdir(scratch)
@@ -107,14 +112,19 @@ def test_status_is_not_done_when_mhl_write_fails(scratch, monkeypatch):
         raise RuntimeError("simulated: interrupted during manifest write")
     monkeypatch.setattr(offload, "_write_mhl", _boom)
 
-    with pytest.raises(RuntimeError):
-        offload.run_offload(_src(scratch), [scratch / "dst"], verify=True,
-                            emit_mhl=True, resume=str(scratch / "st.json"))
+    code, summary, _sp = offload.run_offload(
+        _src(scratch), [scratch / "dst"], verify=True,
+        emit_mhl=True, resume=str(scratch / "st.json"))
 
     st = json.loads((scratch / "st.json").read_text(encoding="utf-8"))
-    dst_state = st["destinations"][str((scratch / "dst").resolve())]
+    key = str((scratch / "dst").resolve())
+    dst_state = st["destinations"][key]
     assert dst_state["status"] != "done", "檔案拷完不等於過卡完成 —— manifest 才是交付物"
+    assert dst_state["status"] == "failed", "「running」跟使用者中途取消同形，分不出來"
+    assert "interrupted during manifest write" in (dst_state.get("error") or "")
     assert not dst_state.get("mhl_path")
+    assert summary[key]["error"], "summary 是 UI 唯一讀得到的東西"
+    assert code != 0, "沒有 manifest 不可以回 0"
 
 
 def test_status_done_always_carries_an_mhl_path(scratch, monkeypatch):

@@ -48,6 +48,7 @@
   let rebuilding = false
   let err = ''
   let startedAt = 0 // ms — set when the run's 'start' event arrives (for elapsed)
+  let joinedLate = false // true when startedAt was seeded by a mid-run join, not 'start'
   let now = Date.now() // kept fresh by the 1s tick; seeded so countdowns never read 0
   let tick = null
   // edge-state C1 (redesign essay 08) — auto-reconnect with backoff when the ws
@@ -89,6 +90,25 @@
     return api.appendToken(base)
   }
 
+  // A client that connects mid-run never saw 'start', and the server sends no
+  // snapshot on connect. Everything the header shows is seeded there, so a
+  // late join (a reload, the auto-reconnect below, a second tab) rendered
+  // 0 files / 0% / blank elapsed over a live import — and `remaining` went to
+  // 0 because it is total minus the rows we happen to have seen. Every per-file
+  // and per-stage event already carries `total`, so adopt it from the first one
+  // that arrives instead of adding a protocol round-trip. The 'complete'
+  // handler already does this for `halted` — same gap, one field wide.
+  function adoptRunHeader(msg) {
+    if (!total && msg.total) total = msg.total
+    if (!startedAt) {
+      // We do not know when the run began, only when we joined. Showing that
+      // number as ELAPSED would be a wrong figure where there is currently a
+      // blank one, so it is flagged and labelled "+MM:SS (since joined)".
+      startedAt = Date.now()
+      joinedLate = true
+    }
+  }
+
   function pushLog(text, stage = '') {
     const t = new Date().toLocaleTimeString()
     log = [{ t, stage, text }, ...log].slice(0, 60)
@@ -114,8 +134,10 @@
         stageCounts = {}
         complete = null
         startedAt = Date.now()
+        joinedLate = false
         pushLog(`start · ${total} files`)
       } else if (msg.type === 'file') {
+        adoptRunHeader(msg)
         // Preserve any stage already recorded for this file (e.g. a vision event
         // can land after the "done" file event in phase 2 — don't clobber it).
         const prev = files[msg.index] || {}
@@ -123,6 +145,7 @@
         files = files // trigger reactivity
         pushLog(`[${msg.index}/${msg.total}] ${msg.filename} · ${msg.status}`)
       } else if (msg.type === 'stage') {
+        adoptRunHeader(msg)
         // Per-stage event (S1a brick 3): attribute to the in-flight file by index
         // and refresh the aggregate tally the backend keeps for us.
         const prev = files[msg.index] || { filename: msg.filename, status: 'transcribing' }
@@ -215,7 +238,7 @@
     ['TRANSCRIBED', stageCounts.transcribe || 0],
     ['TAGGED', stageCounts.vision || 0],
   ]
-  $: elapsed = startedAt && now ? fmtDur(now - startedAt) : ''
+  $: elapsed = startedAt && now ? (joinedLate ? '+' : '') + fmtDur(now - startedAt) : ''
 
   function fmtDur(ms) {
     const s = Math.floor(ms / 1000)
@@ -283,7 +306,7 @@
       <div class="hero">
         <div class="herohead">
           <Eyebrow>Ingest · live websocket</Eyebrow>
-          <Mono dim style="font-size:10.5px;">{#if startedAt}{elapsed} elapsed · real /ws/ingest{:else}real /ws/ingest stream{/if}</Mono>
+          <Mono dim style="font-size:10.5px;">{#if startedAt}{elapsed} {joinedLate ? 'since joined' : 'elapsed'} · real /ws/ingest{:else}real /ws/ingest stream{/if}</Mono>
         </div>
 
         {#if active}
